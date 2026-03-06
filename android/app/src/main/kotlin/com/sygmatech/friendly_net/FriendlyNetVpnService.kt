@@ -13,12 +13,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import okhttp3.*
-import okio.ByteString
-import okio.ByteString.Companion.toByteString
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.InetSocketAddress
-import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -26,18 +22,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * FriendlyNET VPN Service — Mode Invité
  *
  * Architecture :
- *  Device → TUN interface → Ce service → WebSocket vers Worker CF → Hôte → Internet
+ *  Device → TUN interface → Ce service → TailscaleMode (multi-path) → Hôte → Internet
  *
- * Fonctionnement :
- *  1. Crée une interface TUN (tun0) qui capture TOUT le trafic IP de l'appareil
- *  2. Ouvre un WebSocket vers le Worker Cloudflare (bufferwave-tunnel)
- *  3. Lit les paquets IP du TUN → envoie en binaire via WebSocket
- *  4. Reçoit les réponses IP du WS → réinjecte dans le TUN
+ * TailscaleMode sélectionne automatiquement le meilleur chemin :
+ *   Niveau 1 : WiFi Direct (0 Mo data, portée locale)
+ *   Niveau 2 : LAN direct via IP locale (hotspot partagé)
+ *   Niveau 3 : Cloudflare Worker WebSocket (tunnel standard)
+ *   Niveau 4 : Multi-hop Workers (si Worker principal bloqué)
  *
  * Survie Orange throttle :
- *  - Keepalive configurable (15s normal, 45s mode éco)
- *  - Reconnexion automatique sur déconnexion WS
- *  - MAX_RECONNECT_ATTEMPTS = 20
+ *  - Détection auto du throttle → bascule mode éco (45s keepalive)
+ *  - Path healing : reconstruit le chemin si silence > 90s
+ *  - Reconnexion max 20 tentatives, backoff 2s→120s
  */
 class FriendlyNetVpnService : VpnService() {
 
@@ -49,35 +45,39 @@ class FriendlyNetVpnService : VpnService() {
         private const val MAX_RECONNECT_ATTEMPTS = 20
 
         // Intent extras
-        const val EXTRA_NODE_ID = "nodeId"
-        const val EXTRA_USER_ID = "userId"
+        const val EXTRA_NODE_ID    = "nodeId"
+        const val EXTRA_USER_ID    = "userId"
         const val EXTRA_WORKER_URL = "workerUrl"
         const val EXTRA_TUNNEL_KEY = "tunnelKey"
-        const val EXTRA_KEEPALIVE = "keepaliveInterval"
-        const val EXTRA_LOW_BW = "lowBandwidth"
-        const val EXTRA_STOP = "stopVpn"
+        const val EXTRA_KEEPALIVE  = "keepaliveInterval"
+        const val EXTRA_LOW_BW     = "lowBandwidth"
+        const val EXTRA_STOP       = "stopVpn"
+        const val EXTRA_LOCAL_IP   = "localIp"
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val running = AtomicBoolean(false)
     private var tunFd: ParcelFileDescriptor? = null
-    private var webSocket: WebSocket? = null
-    private var reconnectCount = 0
+
+    // ─── TailscaleMode — Moteur adaptatif multi-path ───
+    private var tailscaleEngine: TailscaleMode? = null
 
     // Config reçue de Flutter
-    private var nodeId = ""
-    private var userId = ""
-    private var workerUrl = "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
-    private var tunnelKey = ""
+    private var nodeId           = ""
+    private var userId           = ""
+    private var workerUrl        = "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
+    private var tunnelKey        = ""
     private var keepaliveInterval = 15L
-    private var lowBandwidth = false
+    private var lowBandwidth     = false
+    private var localIp: String? = null
 
-    // HTTP client pour le WebSocket
+    // HTTP client (utilisé par TailscaleMode en interne)
+    @Suppress("unused")
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .pingInterval(keepaliveInterval, TimeUnit.SECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS) // Pas de timeout lecture (flux continu)
+            .readTimeout(0, TimeUnit.SECONDS)
             .build()
     }
 
@@ -101,20 +101,20 @@ class FriendlyNetVpnService : VpnService() {
         }
 
         // Extraire la config
-        nodeId = intent?.getStringExtra(EXTRA_NODE_ID) ?: ""
-        userId = intent?.getStringExtra(EXTRA_USER_ID) ?: ""
-        workerUrl = intent?.getStringExtra(EXTRA_WORKER_URL)
-            ?: "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
-        tunnelKey = intent?.getStringExtra(EXTRA_TUNNEL_KEY) ?: ""
+        nodeId            = intent?.getStringExtra(EXTRA_NODE_ID)    ?: ""
+        userId            = intent?.getStringExtra(EXTRA_USER_ID)    ?: ""
+        workerUrl         = intent?.getStringExtra(EXTRA_WORKER_URL) ?: "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
+        tunnelKey         = intent?.getStringExtra(EXTRA_TUNNEL_KEY) ?: ""
         keepaliveInterval = (intent?.getIntExtra(EXTRA_KEEPALIVE, 15) ?: 15).toLong()
-        lowBandwidth = intent?.getBooleanExtra(EXTRA_LOW_BW, false) ?: false
+        lowBandwidth      = intent?.getBooleanExtra(EXTRA_LOW_BW, false) ?: false
+        localIp           = intent?.getStringExtra(EXTRA_LOCAL_IP)
 
         if (running.get()) {
             Log.d(TAG, "VPN déjà actif — ignoré")
             return START_STICKY
         }
 
-        startForeground(NOTIF_ID, buildNotification("FriendlyNET — Connecté", "Tunnel actif"))
+        startForeground(NOTIF_ID, buildNotification("FriendlyNET — Connexion...", "Sélection du meilleur chemin..."))
 
         serviceScope.launch {
             startVpnTunnel()
@@ -137,13 +137,12 @@ class FriendlyNetVpnService : VpnService() {
     }
 
     // ═══════════════════════════════════════════
-    // TUN + WEBSOCKET
+    // TUN + TAILSCALEMODE
     // ═══════════════════════════════════════════
 
     private suspend fun startVpnTunnel() {
         running.set(true)
-        reconnectCount = 0
-        Log.d(TAG, "Démarrage tunnel VPN → $workerUrl")
+        Log.d(TAG, "Démarrage tunnel VPN — TailscaleMode ENGINE")
 
         // Créer l'interface TUN
         val fd = buildTunInterface() ?: run {
@@ -154,14 +153,51 @@ class FriendlyNetVpnService : VpnService() {
         }
         tunFd = fd
 
-        // Connecter le WebSocket
-        connectWebSocket(fd)
+        // ─── Initialiser le moteur TailscaleMode ───
+        val engine = TailscaleMode(
+            nodeId = nodeId,
+            userId = userId,
+            onDataReceived = { bytes ->
+                // Paquets IP reçus de l'hôte → réinjecter dans le TUN
+                writeToTun(fd, bytes)
+            },
+            onPathChanged = { pathType, address ->
+                Log.d(TAG, "🔀 Chemin actif: $pathType @ $address")
+                val label = when (pathType) {
+                    TailscaleMode.PathType.WIFI_DIRECT          -> "📶 WiFi Direct (0 Mo data)"
+                    TailscaleMode.PathType.LAN                  -> "🏠 LAN direct"
+                    TailscaleMode.PathType.CLOUDFLARE_DIRECT    -> "☁️ Cloudflare Worker"
+                    TailscaleMode.PathType.CLOUDFLARE_MULTI_HOP -> "🔁 Multi-hop (fallback)"
+                    TailscaleMode.PathType.NONE                 -> "❌ Reconnexion..."
+                }
+                updateNotification("FriendlyNET — Connecté", label)
+            },
+            onConnected = {
+                Log.d(TAG, "✅ TailscaleMode connecté")
+                updateNotification("FriendlyNET — Tunnel actif", "Internet via ton ami ✓")
+                // Démarrer la lecture TUN → moteur
+                serviceScope.launch { tunReadLoop(fd) }
+            },
+            onDisconnected = {
+                Log.w(TAG, "TailscaleMode déconnecté")
+                if (running.get()) {
+                    updateNotification("FriendlyNET — Reconnexion...", "Path healing en cours...")
+                }
+            },
+        )
+
+        // Configurer le mode éco selon le paramètre Flutter
+        engine.setEcoMode(lowBandwidth)
+        tailscaleEngine = engine
+
+        // Démarrer le path-finding (LAN si localIp fournie, sinon Cloudflare)
+        engine.start(localIp)
     }
 
     /**
      * Construit l'interface TUN :
      * - Adresse VPN : 10.99.0.2/24
-     * - Route par défaut : 0.0.0.0/0 (tout le trafic passe par le VPN)
+     * - Route par défaut : 0.0.0.0/0 (TOUT le trafic passe par le tunnel)
      * - DNS : 1.1.1.1 (Cloudflare — disponible même avec peu de data)
      * - MTU : 1500
      */
@@ -182,68 +218,15 @@ class FriendlyNetVpnService : VpnService() {
     }
 
     /**
-     * Ouvre le WebSocket vers le Worker Cloudflare.
-     * Le Worker identifie le couple (userId, nodeId) pour router
-     * le trafic vers le bon hôte.
-     */
-    private fun connectWebSocket(fd: ParcelFileDescriptor) {
-        val url = buildString {
-            append(workerUrl)
-            append("?user=$userId")
-            append("&peer=$nodeId")
-            if (tunnelKey.isNotEmpty()) append("&key=$tunnelKey")
-            if (lowBandwidth) append("&lowbw=1")
-        }
-
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("X-FN-Role", "guest")
-            .addHeader("X-FN-NodeId", userId)
-            .build()
-
-        Log.d(TAG, "Connexion WS: $url")
-
-        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
-
-            override fun onOpen(ws: WebSocket, response: Response) {
-                Log.d(TAG, "WS ouvert — tunnel actif")
-                reconnectCount = 0
-                // Démarrer la lecture TUN → WS en coroutine
-                serviceScope.launch { tunReadLoop(fd, ws) }
-            }
-
-            override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                // Paquets IP reçus de l'hôte → réinjecter dans TUN
-                writeToTun(fd, bytes.toByteArray())
-            }
-
-            override fun onMessage(ws: WebSocket, text: String) {
-                // Messages de contrôle (keepalive ack, etc.)
-                Log.v(TAG, "WS text: $text")
-            }
-
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "WS erreur: ${t.message}")
-                if (running.get()) scheduleReconnect(fd)
-            }
-
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WS fermé: $code / $reason")
-                if (running.get()) scheduleReconnect(fd)
-            }
-        })
-    }
-
-    /**
-     * Boucle de lecture TUN → WebSocket.
+     * Boucle de lecture TUN → TailscaleMode.
      * Lit les paquets IP capturés par l'interface TUN
-     * et les envoie en binaire via WebSocket à l'hôte.
+     * et les route via le meilleur chemin disponible.
      */
-    private suspend fun tunReadLoop(fd: ParcelFileDescriptor, ws: WebSocket) {
+    private suspend fun tunReadLoop(fd: ParcelFileDescriptor) {
         val inputStream = FileInputStream(fd.fileDescriptor)
         val buffer = ByteArray(MTU)
 
-        Log.d(TAG, "Boucle TUN → WS démarrée")
+        Log.d(TAG, "Boucle TUN → TailscaleMode démarrée")
 
         withContext(Dispatchers.IO) {
             try {
@@ -251,7 +234,10 @@ class FriendlyNetVpnService : VpnService() {
                     val len = inputStream.read(buffer)
                     if (len > 0) {
                         val packet = buffer.copyOf(len)
-                        ws.send(packet.toByteString())
+                        val sent = tailscaleEngine?.send(packet) ?: false
+                        if (!sent && running.get()) {
+                            Log.v(TAG, "Paquet $len bytes — moteur non prêt, ignoré")
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -260,11 +246,11 @@ class FriendlyNetVpnService : VpnService() {
                 }
             }
         }
-        Log.d(TAG, "Boucle TUN → WS terminée")
+        Log.d(TAG, "Boucle TUN → TailscaleMode terminée")
     }
 
     /**
-     * Réinjection des paquets IP reçus du WS dans le TUN.
+     * Réinjection des paquets IP reçus du moteur dans le TUN.
      * Ces paquets viennent d'Internet via l'hôte.
      */
     private fun writeToTun(fd: ParcelFileDescriptor, data: ByteArray) {
@@ -276,39 +262,14 @@ class FriendlyNetVpnService : VpnService() {
         }
     }
 
-    /**
-     * Reconnexion avec backoff exponentiel.
-     * Max 120s d'attente en mode low bandwidth (plus patient pour Orange throttle).
-     */
-    private fun scheduleReconnect(fd: ParcelFileDescriptor) {
-        if (reconnectCount >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "Max reconnexions atteint ($MAX_RECONNECT_ATTEMPTS) — arrêt VPN")
-            stopVpnInternal()
-            stopSelf()
-            return
-        }
-
-        reconnectCount++
-        val maxWait = if (lowBandwidth) 120 else 60
-        val wait = (2 * (1 shl (reconnectCount - 1))).coerceAtMost(maxWait)
-
-        Log.d(TAG, "Reconnexion $reconnectCount/$MAX_RECONNECT_ATTEMPTS dans ${wait}s...")
-        updateNotification("Reconnexion... ($reconnectCount/$MAX_RECONNECT_ATTEMPTS)")
-
-        serviceScope.launch {
-            delay(wait * 1000L)
-            if (running.get()) connectWebSocket(fd)
-        }
-    }
-
     // ═══════════════════════════════════════════
     // STOP
     // ═══════════════════════════════════════════
 
     private fun stopVpnInternal() {
         if (!running.getAndSet(false)) return
-        Log.d(TAG, "Arrêt VPN")
-        try { webSocket?.close(1000, "FN-Stop"); webSocket = null } catch (_: Exception) {}
+        Log.d(TAG, "Arrêt VPN + TailscaleMode")
+        try { tailscaleEngine?.stop(); tailscaleEngine = null } catch (_: Exception) {}
         try { tunFd?.close(); tunFd = null } catch (_: Exception) {}
     }
 
@@ -349,8 +310,8 @@ class FriendlyNetVpnService : VpnService() {
             .build()
     }
 
-    private fun updateNotification(text: String) {
+    private fun updateNotification(title: String, text: String) {
         val mgr = getSystemService(NotificationManager::class.java)
-        mgr?.notify(NOTIF_ID, buildNotification("FriendlyNET VPN", text))
+        mgr?.notify(NOTIF_ID, buildNotification(title, text))
     }
 }

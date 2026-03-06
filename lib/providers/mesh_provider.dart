@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/friend_peer.dart';
+import '../services/wifi_direct_service.dart';
 
 /// Orchestrateur principal de FriendlyNET.
 ///
@@ -75,6 +76,12 @@ class MeshProvider extends ChangeNotifier {
   Timer? _wsHealthCheck;
   DateTime? _lastWsActivity;
 
+  // WiFi Direct
+  final WifiDirectService _wifiDirect = WifiDirectService();
+  List<WifiDirectPeer> _wifiPeers = [];
+  bool _wifiDirectActive = false;
+  String _wifiDirectIp = '';
+
   // ─── Getters ───
   FriendRole get role => _role;
   MeshPhase get phase => _phase;
@@ -93,6 +100,11 @@ class MeshProvider extends ChangeNotifier {
   bool get isHosting => _role == FriendRole.host;
   bool get isGuest => _role == FriendRole.guest && _phase == MeshPhase.live;
   bool get isSearching => _meshActive;
+
+  // WiFi Direct getters
+  List<WifiDirectPeer> get wifiPeers => List.from(_wifiPeers);
+  bool get wifiDirectActive => _wifiDirectActive;
+  String get wifiDirectIp => _wifiDirectIp;
 
   // Intervalles adaptatifs selon le mode
   int get _heartbeatSec => _lowBandwidth ? 45 : 15;
@@ -198,6 +210,66 @@ class MeshProvider extends ChangeNotifier {
     } catch (_) {
       return false;
     }
+  }
+
+  // ═══════════════════════════════════════════
+  // WIFI DIRECT — Découverte locale 0 data
+  // ═══════════════════════════════════════════
+
+  /// Démarre la découverte WiFi Direct.
+  /// Trouve les appareils FriendlyNET proches sans utiliser de data mobile.
+  Future<void> startWifiDirect() async {
+    _wifiDirect.onPeersFound = (peers) {
+      _wifiPeers = peers;
+      notifyListeners();
+    };
+    _wifiDirect.onConnected = (ip) {
+      _wifiDirectIp = ip;
+      _wifiDirectActive = true;
+      _info = 'WiFi Direct connecté — IP: $ip';
+      notifyListeners();
+    };
+    _wifiDirect.onDisconnected = () {
+      _wifiDirectActive = false;
+      _wifiDirectIp = '';
+      notifyListeners();
+    };
+    _wifiDirect.onError = (msg) {
+      _info = 'WiFi Direct: $msg';
+      notifyListeners();
+    };
+    final ok = await _wifiDirect.startDiscovery();
+    if (ok) {
+      _info = 'Recherche WiFi Direct...';
+      notifyListeners();
+    }
+  }
+
+  Future<void> stopWifiDirect() async {
+    await _wifiDirect.stopDiscovery();
+    _wifiPeers = [];
+    _wifiDirectActive = false;
+    _wifiDirectIp = '';
+    notifyListeners();
+  }
+
+  Future<bool> connectWifiDirect(String mac) async {
+    return await _wifiDirect.connectToPeer(mac);
+  }
+
+  // ═══════════════════════════════════════════
+  // DEEPLINKS ANDROID SETTINGS
+  // ═══════════════════════════════════════════
+
+  /// Ouvre les paramètres "Données non restreintes" pour cette app.
+  /// Essentiel pour survivre en mode Data Saver d'Orange.
+  Future<void> openDataSaverSettings() async {
+    try { await _systemChannel.invokeMethod('openDataSaverSettings'); } catch (_) {}
+  }
+
+  /// Ouvre les paramètres batterie pour désactiver l'optimisation.
+  Future<void> openBatterySettings() async {
+    try { await _systemChannel.invokeMethod('openBatterySettings'); } catch (_) {}
   }
 
   /// Lance le foreground service Android avec notification
@@ -830,6 +902,7 @@ class MeshProvider extends ChangeNotifier {
   void dispose() {
     stopSearch();
     stopForegroundGuard();
+    _wifiDirect.dispose();
     _metricsTick?.cancel();
     _recoveryTimer?.cancel();
     _wsHealthCheck?.cancel();

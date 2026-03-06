@@ -103,15 +103,119 @@ class SettingsScreen extends StatelessWidget {
                     ),
                     Divider(color: _outline, height: 1),
                     _actionTile(
+                      icon: Icons.battery_alert,
+                      color: const Color(0xFFFFEB3B),
+                      title: 'Paramètres batterie (direct)',
+                      subtitle: 'Ouvre directement les réglages batterie\n'
+                          'pour désactiver les restrictions en arrière-plan.',
+                      onTap: () => prov.openBatterySettings(),
+                    ),
+                    Divider(color: _outline, height: 1),
+                    _actionTile(
                       icon: Icons.signal_cellular_alt,
                       color: const Color(0xFF2196F3),
-                      title: 'Données illimitées en arrière-plan',
+                      title: 'Données non restreintes',
+                      subtitle: 'Zéro restriction data en arrière-plan.\n'
+                          'Critique quand Orange active le mode Économie.',
+                      onTap: () => prov.openDataSaverSettings(),
+                    ),
+                    Divider(color: _outline, height: 1),
+                    _actionTile(
+                      icon: Icons.signal_cellular_connected_no_internet_4_bar,
+                      color: const Color(0xFF9C27B0),
+                      title: 'Données illimitées (page app)',
                       subtitle: 'Permet à FriendlyNET d\'utiliser la data\n'
-                          'même en mode "Économie de données".',
+                          'même en mode "Economie de données".',
                       onTap: () async {
                         await prov.requestUnrestrictedData();
                       },
                     ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // ─── Section : WiFi Direct ───
+              _sectionTitle('📶 WiFi Direct — Zéro data'),
+              const SizedBox(height: 8),
+              _card(
+                child: Column(
+                  children: [
+                    _toggle(
+                      icon: Icons.wifi_find,
+                      color: const Color(0xFF00BCD4),
+                      title: 'Découverte WiFi Direct',
+                      subtitle: 'Trouve des amis FriendlyNET proches\n'
+                          'sans aucune data mobile (0 Mo).\n'
+                          'Fonctionne même forfait épuisé !',
+                      value: prov.wifiDirectActive,
+                      onChanged: (v) async {
+                        if (v) {
+                          await prov.startWifiDirect();
+                        } else {
+                          await prov.stopWifiDirect();
+                        }
+                      },
+                    ),
+                    if (prov.wifiPeers.isNotEmpty) ...[
+                      Divider(color: _outline, height: 1),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${prov.wifiPeers.length} pair(s) WiFi Direct trouvé(s)',
+                              style: TextStyle(color: Colors.white.withAlpha(160), fontSize: 12,
+                                  fontWeight: FontWeight.w700)),
+                            const SizedBox(height: 8),
+                            ...prov.wifiPeers.map((p) => Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 32, height: 32,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF00BCD4).withAlpha(30),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(color: const Color(0xFF00BCD4).withAlpha(80)),
+                                    ),
+                                    child: Center(child: Text(p.letter,
+                                      style: const TextStyle(color: Color(0xFF00BCD4),
+                                          fontWeight: FontWeight.w700))),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(p.name, style: const TextStyle(color: Colors.white,
+                                          fontSize: 13, fontWeight: FontWeight.w600)),
+                                      Text(p.statusLabel, style: TextStyle(
+                                          color: Colors.white.withAlpha(100), fontSize: 10)),
+                                    ],
+                                  )),
+                                  if (p.isAvailable)
+                                    GestureDetector(
+                                      onTap: () => prov.connectWifiDirect(p.mac),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF00BCD4).withAlpha(25),
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: const Color(0xFF00BCD4).withAlpha(80)),
+                                        ),
+                                        child: const Text('Connecter',
+                                          style: TextStyle(color: Color(0xFF00BCD4),
+                                              fontSize: 11, fontWeight: FontWeight.w700)),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            )),
+                          ],
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
