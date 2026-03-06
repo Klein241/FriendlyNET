@@ -1,0 +1,5 @@
+# Shorebird configuration for FriendlyNET
+# Install: https://docs.shorebird.dev/install
+# Then run: shorebird init
+app_id: # sera rempli après `shorebird init`
+channel: stable
