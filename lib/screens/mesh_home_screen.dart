@@ -5,6 +5,7 @@ import '../models/friend_peer.dart';
 import '../providers/mesh_provider.dart';
 import 'hosting_screen.dart';
 import 'guest_screen.dart';
+import 'settings_screen.dart';
 
 /// Écran principal FriendlyNET.
 /// Affiche les amis sur le mesh et permet de se connecter ou partager.
@@ -120,9 +121,37 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
                 style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900)),
               Text('Salut ${prov.displayName} 👋',
                 style: TextStyle(color: Colors.white.withAlpha(130), fontSize: 12)),
-            ],
+              ],
           ),
           const Spacer(),
+          // Low bandwidth badge
+          if (prov.lowBandwidth)
+            Container(
+              margin: const EdgeInsets.only(right: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: _orange.withAlpha(20),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: _orange.withAlpha(60)),
+              ),
+              child: Text('ÉCO',
+                style: TextStyle(color: _orange, fontSize: 9, fontWeight: FontWeight.w800)),
+            ),
+          // Settings button
+          GestureDetector(
+            onTap: () => Navigator.push(context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen())),
+            child: Container(
+              width: 42, height: 42,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withAlpha(8),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white24),
+              ),
+              child: const Icon(Icons.settings, color: Colors.white54, size: 20),
+            ),
+          ),
           GestureDetector(
             onTap: () {
               if (prov.isSearching) {
