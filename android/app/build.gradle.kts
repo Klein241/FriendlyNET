@@ -42,3 +42,14 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // WebSocket HTTP client — tunnel VPN & relay
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Kotlin Coroutines — boucles IO asynchrones
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // AndroidX Core KTX
+    implementation("androidx.core:core-ktx:1.13.1")
+}
