@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'providers/mesh_provider.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/mesh_home_screen.dart';
@@ -49,47 +48,32 @@ class _EntryRouter extends StatefulWidget {
 }
 
 class _EntryRouterState extends State<_EntryRouter> {
-  bool _loading = true;
-  bool _firstLaunch = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkFirstLaunch();
-  }
-
-  Future<void> _checkFirstLaunch() async {
-    final prefs = await SharedPreferences.getInstance();
-    final name = prefs.getString('fn_display_name') ?? '';
-    if (mounted) {
-      setState(() {
-        _loading = false;
-        _firstLaunch = name.isEmpty;
-      });
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0D0D1A),
-        body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF6C63FF)),
-        ),
-      );
-    }
+    return Consumer<MeshProvider>(
+      builder: (ctx, prov, _) {
+        // Attendre que le provider ait fini le bootstrap
+        if (!prov.isReady) {
+          return const Scaffold(
+            backgroundColor: Color(0xFF0D0D1A),
+            body: Center(
+              child: CircularProgressIndicator(color: Color(0xFF6C63FF)),
+            ),
+          );
+        }
 
-    if (_firstLaunch) {
-      return WelcomeScreen(
-        onReady: (name) {
-          final prov = context.read<MeshProvider>();
-          prov.updateLabel(name);
-          setState(() => _firstLaunch = false);
-        },
-      );
-    }
+        // Si le nom est vide → écran d'accueil
+        if (prov.displayName.isEmpty) {
+          return WelcomeScreen(
+            onReady: (name) {
+              prov.updateLabel(name);
+            },
+          );
+        }
 
-    return const MeshHomeScreen();
+        // Sinon → écran principal
+        return const MeshHomeScreen();
+      },
+    );
   }
 }

@@ -11,6 +11,7 @@ import '../services/wifi_direct_service.dart';
 import '../services/e2e_service.dart';
 import '../services/connectivity_monitor.dart';
 import '../services/bufferwave_api_service.dart';
+import '../services/notification_service.dart';
 
 /// Orchestrateur principal de FriendlyNET.
 ///
@@ -53,7 +54,7 @@ class MeshProvider extends ChangeNotifier {
   String _info   = 'Bienvenue sur FriendlyNET';
   bool   _ready  = false;
 
-  bool _autoConsent  = false;
+  bool _autoConsent  = true;
   bool _lowBandwidth = false;
 
   // Pairs
@@ -92,6 +93,7 @@ class MeshProvider extends ChangeNotifier {
   final E2EService             _e2e      = E2EService();
   final ConnectivityMonitor    _connMon  = ConnectivityMonitor();
   final BufferwaveApiService   _bwApi    = BufferwaveApiService();
+  final NotificationService    _notif    = NotificationService();
   Timer? _bwHeartbeatTimer;
 
   // ─── Getters ───
@@ -129,7 +131,7 @@ class MeshProvider extends ChangeNotifier {
   // Mesh endpoint (depuis BufferwaveApiService ou fallback)
   String get _meshEndpoint => _bwApi.isInitialized
       ? _bwApi.meshWssUrl
-      : 'wss://bufferwave-tunnel.sfrfrfr.workers.dev/mesh';
+      : 'wss://friendlynet-mesh.bufferwave.workers.dev/mesh';
 
   // ═══════════════════════════════════════════
   // INITIALISATION
@@ -140,7 +142,7 @@ class MeshProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _label        = prefs.getString(_prefName)    ?? '';
     _nodeId       = prefs.getString(_prefNodeId)  ?? '';
-    _autoConsent  = prefs.getBool(_prefConsent)   ?? false;
+    _autoConsent  = prefs.getBool(_prefConsent)   ?? true;  // ON par défaut
     _lowBandwidth = prefs.getBool(_prefLowBw)     ?? false;
     if (_nodeId.isEmpty) {
       _nodeId = _makeNodeId();
@@ -151,6 +153,9 @@ class MeshProvider extends ChangeNotifier {
     // ─── Init E2E (génère la paire de clés X25519 locale) ───
     await _e2e.initialize();
     _log.i('E2E prêt — fingerprint: ${_e2e.fingerprint}');
+
+    // ─── Init Notifications ───
+    await _notif.initialize();
 
     // ─── Init BufferWave API (health-check Worker + DoH) ───
     unawaited(_bwApi.initialize(_nodeId).then((_) {
@@ -180,6 +185,21 @@ class MeshProvider extends ChangeNotifier {
 
     _ready = true;
     notifyListeners();
+
+    // ─── Auto-activer les protections système au premier lancement ───
+    unawaited(_autoActivateSystemProtections());
+  }
+
+  /// Active automatiquement toutes les protections système dès le premier
+  /// lancement : batterie, données illimitées, foreground service.
+  Future<void> _autoActivateSystemProtections() async {
+    try {
+      await requestBatteryExemption();
+      await requestUnrestrictedData();
+      await startForegroundGuard();
+    } catch (_) {
+      // Silencieux — les protections seront retentées au prochain lancement
+    }
   }
 
   Future<void> updateLabel(String name) async {
@@ -587,7 +607,7 @@ class MeshProvider extends ChangeNotifier {
         'localProxy':        true,
         'proxyHost':         host.meshIp.isNotEmpty ? host.meshIp : host.uid,
         'proxyPort':         8899,
-        'workerUrl':         'wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel',
+        'workerUrl':         'wss://friendlynet-mesh.bufferwave.workers.dev/tunnel',
         'tunnelKey':         '',
         'lowBandwidth':      _lowBandwidth,
         'keepaliveInterval': _lowBandwidth ? 45 : 15,
@@ -644,9 +664,15 @@ class MeshProvider extends ChangeNotifier {
           _handleBridgeAccept(data);
           break;
         case 'peer_joined':
+          final peerName = data['name'] as String? ?? 'Pair';
+          _notif.notifyNewPeer(peerName);
           if (!_lowBandwidth) {
             _send({'action': 'list_peers', 'node': _nodeId});
           }
+          break;
+        case 'peer_left':
+          final peerName = data['name'] as String? ?? 'Pair';
+          _notif.notifyPeerLeft(peerName);
           break;
         case 'heartbeat_ack':
           // Connexion confirmée vivante
@@ -713,12 +739,16 @@ class MeshProvider extends ChangeNotifier {
       _send(accept);
       _bridge = FriendPeer(uid: from, nickname: label, hosting: false, online: true);
       _info   = '$label connecté automatiquement ✓';
+      _notif.notifyConnected(label, asHost: true);
+      // Connect to Worker relay so guest's tunnel data reaches us
+      _startHostRelayTunnel(from);
       notifyListeners();
       return;
     }
 
     _pendingAsk = FriendPeer(uid: from, nickname: label, hosting: false, online: true);
     _info       = '$label souhaite utiliser votre connexion';
+    _notif.notifyConnectionRequest(label);
     notifyListeners();
   }
 
@@ -736,6 +766,45 @@ class MeshProvider extends ChangeNotifier {
 
     _info = 'Pont accepté — tunnel en cours...';
     notifyListeners();
+  }
+
+  // ═══════════════════════════════════════════
+  // HOST RELAY TUNNEL — Host connects to Worker
+  // ═══════════════════════════════════════════
+
+  WebSocketChannel? _hostRelayWs;
+
+  /// Connects the host to the Worker /tunnel endpoint
+  /// so the Guest's TUN packets can be relayed to us.
+  void _startHostRelayTunnel(String guestNodeId) {
+    _hostRelayWs?.sink.close();
+
+    final workerBase = _bwApi.isInitialized
+        ? _bwApi.workerBaseUrl
+        : 'https://friendlynet-mesh.bufferwave.workers.dev';
+    final wsBase = workerBase.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
+    final relayUri = Uri.parse(
+      '$wsBase/tunnel?user=${Uri.encodeComponent(_nodeId)}&peer=${Uri.encodeComponent(guestNodeId)}&mode=tailscale',
+    );
+
+    _log.i('Host relay → $relayUri');
+
+    try {
+      _hostRelayWs = WebSocketChannel.connect(relayUri);
+      _hostRelayWs!.stream.listen(
+        (data) {
+          // Data from guest via Worker → forward to local relay / internet
+          _log.d('Host relay received ${data is List ? (data as List).length : data.toString().length} bytes from guest');
+          // For now, we log it. The actual internet forwarding
+          // is handled by the native TCP relay on port 8899.
+          // Guest packets come here → they need to go to internet.
+        },
+        onError: (e) => _log.w('Host relay error: $e'),
+        onDone: () => _log.i('Host relay closed'),
+      );
+    } catch (e) {
+      _log.e('Host relay connect fail: $e');
+    }
   }
 
   // ═══════════════════════════════════════════

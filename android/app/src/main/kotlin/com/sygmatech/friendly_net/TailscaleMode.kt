@@ -48,8 +48,8 @@ class TailscaleMode(
 
         // Workers Cloudflare — PoPs dispersés géographiquement
         private val WORKER_ENDPOINTS = listOf(
-            "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel", // Primary
-            "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel", // Fallback 1 (même worker, autre connexion)
+            "wss://friendlynet-mesh.bufferwave.workers.dev/tunnel", // Primary
+            "wss://friendlynet-mesh.bufferwave.workers.dev/tunnel", // Fallback 1 (même worker, autre connexion)
         )
 
         // Seuils de qualité réseau

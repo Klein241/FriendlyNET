@@ -48,7 +48,7 @@ class FriendlyNetRelayService : Service() {
 
         const val EXTRA_PORT = "port"
         const val EXTRA_STOP = "stopRelay"
-        const val WORKER_RELAY_URL = "wss://bufferwave-tunnel.sfrfrfr.workers.dev/relay"
+        const val WORKER_RELAY_URL = "wss://friendlynet-mesh.bufferwave.workers.dev/relay"
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())

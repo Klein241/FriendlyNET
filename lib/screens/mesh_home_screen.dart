@@ -111,7 +111,13 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
               borderRadius: BorderRadius.circular(12),
               boxShadow: [BoxShadow(color: _purple.withAlpha(40), blurRadius: 12)],
             ),
-            child: const Center(child: Text('🤝', style: TextStyle(fontSize: 20))),
+            child: Center(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset('assets/friendlynet_logo.png',
+                  width: 28, height: 28, fit: BoxFit.cover),
+              ),
+            ),
           ),
           const SizedBox(width: 12),
           Column(

@@ -11,6 +11,8 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // Requis par flutter_local_notifications
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -25,6 +27,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        multiDexEnabled = true
     }
 
     buildTypes {
@@ -39,6 +42,9 @@ flutter {
 }
 
 dependencies {
+    // Core Library Desugaring — requis par flutter_local_notifications
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // WebSocket HTTP client — tunnel & relay
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

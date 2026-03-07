@@ -38,40 +38,66 @@ class _GuestScreenState extends State<GuestScreen>
   Widget build(BuildContext context) {
     return Consumer<MeshProvider>(
       builder: (ctx, prov, _) {
-        if (prov.isIdle) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) Navigator.pop(context);
-          });
-        }
+        final stopped = prov.isIdle;
         final host = prov.bridge;
         final hostName = host?.nickname ?? 'un ami';
 
         return Scaffold(
           backgroundColor: _bg,
           body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Column(
-                children: [
-                  const SizedBox(height: 16),
-                  _header(),
-                  const Spacer(),
-                  _visual(),
-                  const SizedBox(height: 30),
-                  _infoCard(prov, hostName),
-                  const SizedBox(height: 20),
-                  _stats(prov),
-                  const Spacer(),
-                  _tips(),
-                  const SizedBox(height: 16),
-                  _disconnectBtn(),
-                  const SizedBox(height: 20),
-                ],
-              ),
-            ),
+            child: stopped
+                ? _stoppedState()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 16),
+                        _header(),
+                        const Spacer(),
+                        _visual(),
+                        const SizedBox(height: 30),
+                        _infoCard(prov, hostName),
+                        const SizedBox(height: 20),
+                        _stats(prov),
+                        const Spacer(),
+                        _tips(),
+                        const SizedBox(height: 16),
+                        _disconnectBtn(),
+                        const SizedBox(height: 20),
+                      ],
+                    ),
+                  ),
           ),
         );
       },
+    );
+  }
+
+  Widget _stoppedState() {
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) Navigator.of(context).pop();
+    });
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 80, height: 80,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: _purple.withAlpha(20),
+              border: Border.all(color: _purple.withAlpha(60), width: 2),
+            ),
+            child: const Icon(Icons.link_off, color: _purple, size: 40),
+          ),
+          const SizedBox(height: 16),
+          const Text('Déconnecté',
+            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          Text('Retour à l\'accueil...',
+            style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 13)),
+        ],
+      ),
     );
   }
 

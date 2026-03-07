@@ -459,7 +459,7 @@ class SettingsScreen extends StatelessWidget {
                     ),
                     Text(
                       online
-                        ? 'bufferwave-tunnel.sfrfrfr.workers.dev'
+                        ? 'friendlynet-mesh.bufferwave.workers.dev'
                         : 'Mode dégradé — WiFi Direct uniquement',
                       style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 10),
                     ),

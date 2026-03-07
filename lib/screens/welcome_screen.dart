@@ -81,8 +81,15 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                         ),
                       ],
                     ),
-                    child: const Center(
-                      child: Text('🤝', style: TextStyle(fontSize: 48)),
+                    child: Center(
+                      child: ClipOval(
+                        child: Image.asset(
+                          'assets/friendlynet_logo.png',
+                          width: 80,
+                          height: 80,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
                     ),
                   );
                 },

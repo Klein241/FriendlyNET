@@ -20,8 +20,8 @@ class BufferwaveApiService {
     level: Level.info,
   );
 
-  static const _workerBase     = 'https://bufferwave-tunnel.sfrfrfr.workers.dev';
-  static const _meshEndpointWs = 'wss://bufferwave-tunnel.sfrfrfr.workers.dev/mesh';
+  static const _workerBase     = 'https://friendlynet-mesh.bufferwave.workers.dev';
+  static const _meshEndpointWs = 'wss://friendlynet-mesh.bufferwave.workers.dev/mesh';
 
   bool _initialized    = false;
   bool _workerHealthy  = false;
@@ -122,5 +122,6 @@ class BufferwaveApiService {
   // MESH WSS URL
   // ═══════════════════════════════════════════
 
-  String get meshWssUrl => _meshEndpointWs;
+  String get meshWssUrl    => _meshEndpointWs;
+  String get workerBaseUrl => _workerBase;
 }

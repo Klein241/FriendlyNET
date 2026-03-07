@@ -38,51 +38,81 @@ class _HostingScreenState extends State<HostingScreen>
   Widget build(BuildContext context) {
     return Consumer<MeshProvider>(
       builder: (ctx, prov, _) {
-        if (prov.isIdle && !prov.isHosting) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) Navigator.pop(context);
-          });
-        }
         final guest = prov.bridge;
         final hasGuest = guest != null;
+
+        // Si le hosting s'est arrêté (isIdle), afficher un état de transition
+        // au lieu de pop immédiat (qui causait l'écran noir)
+        final stopped = prov.isIdle && !prov.isHosting;
 
         return Scaffold(
           backgroundColor: _bg,
           body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Column(
-                children: [
-                  const SizedBox(height: 16),
-                  _buildHeader(),
-                  const Spacer(),
-                  _buildRing(hasGuest),
-                  const SizedBox(height: 24),
-                  Text(
-                    hasGuest ? 'Connexion partagée !' : 'En attente d\'un ami...',
-                    style: TextStyle(
-                      color: hasGuest ? _mint : Colors.white,
-                      fontSize: 20, fontWeight: FontWeight.w800,
+            child: stopped
+                ? _stoppedState()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 16),
+                        _buildHeader(),
+                        const Spacer(),
+                        _buildRing(hasGuest),
+                        const SizedBox(height: 24),
+                        Text(
+                          hasGuest ? 'Connexion partagée !' : 'En attente d\'un ami...',
+                          style: TextStyle(
+                            color: hasGuest ? _mint : Colors.white,
+                            fontSize: 20, fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(prov.statusLine,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 13)),
+                        const SizedBox(height: 24),
+                        if (hasGuest) _connectedGuest(guest),
+                        if (prov.pendingAsk != null) _askBanner(prov),
+                        const Spacer(),
+                        _statsRow(prov),
+                        const SizedBox(height: 16),
+                        _stopBtn(),
+                        const SizedBox(height: 20),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  Text(prov.statusLine,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 13)),
-                  const SizedBox(height: 24),
-                  if (hasGuest) _connectedGuest(guest),
-                  if (prov.pendingAsk != null) _askBanner(prov),
-                  const Spacer(),
-                  _statsRow(prov),
-                  const SizedBox(height: 16),
-                  _stopBtn(),
-                  const SizedBox(height: 20),
-                ],
-              ),
-            ),
           ),
         );
       },
+    );
+  }
+
+  Widget _stoppedState() {
+    // Auto-return après un court délai
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) Navigator.of(context).pop();
+    });
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 80, height: 80,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: _mint.withAlpha(20),
+              border: Border.all(color: _mint.withAlpha(60), width: 2),
+            ),
+            child: const Icon(Icons.check_circle_outline, color: _mint, size: 40),
+          ),
+          const SizedBox(height: 16),
+          const Text('Partage terminé',
+            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          Text('Retour à l\'accueil...',
+            style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 13)),
+        ],
+      ),
     );
   }
 
