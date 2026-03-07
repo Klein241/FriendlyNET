@@ -117,6 +117,19 @@ class MainActivity : FlutterActivity() {
                         })
                         result.success(true)
                     }
+                    "prepareVpn" -> {
+                        // Check if VPN permission is already granted
+                        val prepareIntent = VpnService.prepare(this)
+                        if (prepareIntent != null) {
+                            // Need to request permission — show system dialog
+                            pendingVpnResult = result
+                            pendingVpnArgs = null // just checking, not starting
+                            startActivityForResult(prepareIntent, VPN_PERMISSION_CODE)
+                        } else {
+                            // Already granted
+                            result.success(true)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -125,10 +138,47 @@ class MainActivity : FlutterActivity() {
     // ─── DNS Relay Instance ───
     private var dnsRelay: DnsRelayEngine? = null
 
+    // ─── TCP Forwarding Manager (Host side) ───
+    private val tcpChannels = java.util.concurrent.ConcurrentHashMap<Int, java.net.Socket>()
+    private val tcpScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
+    private var relayMethodChannel: MethodChannel? = null
+    @Volatile private var totalBytesIn = 0L
+    @Volatile private var totalBytesOut = 0L
+    @Volatile private var totalTcpConns = 0
+
+    // ─── PacketProcessor (raw IP packet engine) ───
+    private var packetProcessor: PacketProcessor? = null
+
+    private fun ensurePacketProcessor() {
+        if (packetProcessor != null) return
+        packetProcessor = PacketProcessor(
+            onResponsePacket = { responseIpPacket ->
+                // Send constructed IP response packet back to Dart → EdgeRelay → Guest
+                runOnUiThread {
+                    relayMethodChannel?.invokeMethod("responsePacket", mapOf(
+                        "data" to responseIpPacket.toList(),
+                    ))
+                }
+            },
+            onMetrics = { bytesIn, bytesOut ->
+                runOnUiThread {
+                    relayMethodChannel?.invokeMethod("metricsUpdate", mapOf(
+                        "bytesIn" to bytesIn,
+                        "bytesOut" to bytesOut,
+                    ))
+                }
+            },
+        )
+        android.util.Log.d("FN-TCP", "PacketProcessor initialized")
+    }
+
     // ─── Relay Service ─────────────────────────────────────────────────
     private fun setupRelayChannel(engine: FlutterEngine) {
-        MethodChannel(engine.dartExecutor.binaryMessenger, RELAY_CHANNEL)
-            .setMethodCallHandler { call, result ->
+        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, RELAY_CHANNEL)
+        relayMethodChannel = channel
+        channel.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "startRelay" -> {
                         val port = call.argument<Int>("port") ?: 8899
@@ -152,6 +202,9 @@ class MainActivity : FlutterActivity() {
                         // Stop DNS relay alongside TCP relay
                         dnsRelay?.stop()
 
+                        // Close all TCP forwarding channels
+                        closeTcpAll()
+
                         result.success(true)
                     }
                     "startDns" -> {
@@ -169,9 +222,154 @@ class MainActivity : FlutterActivity() {
                             "dnsCacheSize" to (dnsRelay?.cacheSize ?: 0),
                         ))
                     }
+
+                    // ─── TCP Forwarding (Host-side exit node) ───
+
+                    "forwardTcp" -> {
+                        val ch   = call.argument<Int>("channelId") ?: 0
+                        val host = call.argument<String>("host") ?: ""
+                        val port = call.argument<Int>("port") ?: 0
+                        if (ch == 0 || host.isEmpty() || port == 0) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        openTcpChannel(ch, host, port)
+                        result.success(true)
+                    }
+
+                    "relayData" -> {
+                        val ch   = call.argument<Int>("channelId") ?: 0
+                        @Suppress("UNCHECKED_CAST")
+                        val data = call.argument<ByteArray>("data")
+                            ?: (call.argument<List<Int>>("data"))?.let { list ->
+                                ByteArray(list.size) { list[it].toByte() }
+                            }
+                        if (ch != 0 && data != null) {
+                            writeTcpChannel(ch, data)
+                        }
+                        result.success(true)
+                    }
+
+                    "closeChannel" -> {
+                        val ch = call.argument<Int>("channelId") ?: 0
+                        closeTcpChannel(ch)
+                        result.success(true)
+                    }
+
+                    "processPacket" -> {
+                        // Raw IP packet from guest → PacketProcessor
+                        @Suppress("UNCHECKED_CAST")
+                        val data = call.argument<ByteArray>("data")
+                            ?: (call.argument<List<Int>>("data"))?.let { list ->
+                                ByteArray(list.size) { list[it].toByte() }
+                            }
+                        if (data != null) {
+                            ensurePacketProcessor()
+                            packetProcessor?.processPacket(data)
+                        }
+                        result.success(true)
+                    }
+
+                    "getRelayMetrics" -> {
+                        result.success(mapOf(
+                            "activeChannels" to tcpChannels.size,
+                            "totalConnections" to totalTcpConns,
+                            "bytesIn" to (packetProcessor?.totalBytesIn ?: totalBytesIn),
+                            "bytesOut" to (packetProcessor?.totalBytesOut ?: totalBytesOut),
+                            "activeConns" to (packetProcessor?.activeConnections ?: 0),
+                        ))
+                    }
+
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // ─── TCP Channel Management ───
+
+    private fun openTcpChannel(channelId: Int, host: String, port: Int) {
+        tcpScope.launch {
+            try {
+                val socket = java.net.Socket()
+                socket.connect(java.net.InetSocketAddress(host, port), 10_000)
+                socket.soTimeout = 0
+                tcpChannels[channelId] = socket
+                totalTcpConns++
+
+                android.util.Log.d("FN-TCP", "[$channelId] Connected → $host:$port")
+
+                // Notify Dart that connection is established
+                runOnUiThread {
+                    relayMethodChannel?.invokeMethod("tcpConnected", mapOf(
+                        "channelId" to channelId,
+                    ))
+                }
+
+                // Read loop: Internet → Dart → EdgeRelay → Worker → Guest
+                val buf = ByteArray(8192)
+                val inputStream = socket.getInputStream()
+                try {
+                    while (true) {
+                        val n = inputStream.read(buf)
+                        if (n < 0) break
+                        totalBytesIn += n
+                        val data = buf.copyOf(n)
+                        // Send response data back to Dart
+                        runOnUiThread {
+                            relayMethodChannel?.invokeMethod("tcpData", mapOf(
+                                "channelId" to channelId,
+                                "data" to data.toList(),
+                            ))
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                android.util.Log.d("FN-TCP", "[$channelId] Socket closed by remote")
+                tcpChannels.remove(channelId)
+
+                runOnUiThread {
+                    relayMethodChannel?.invokeMethod("tcpClosed", mapOf(
+                        "channelId" to channelId,
+                    ))
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("FN-TCP", "[$channelId] Connect fail: ${e.message}")
+                runOnUiThread {
+                    relayMethodChannel?.invokeMethod("tcpError", mapOf(
+                        "channelId" to channelId,
+                        "error" to (e.message ?: "unknown"),
+                    ))
+                }
+            }
+        }
+    }
+
+    private fun writeTcpChannel(channelId: Int, data: ByteArray) {
+        tcpScope.launch {
+            try {
+                val socket = tcpChannels[channelId] ?: return@launch
+                socket.getOutputStream().write(data)
+                socket.getOutputStream().flush()
+                totalBytesOut += data.size
+            } catch (e: Exception) {
+                android.util.Log.v("FN-TCP", "[$channelId] Write error: ${e.message}")
+                closeTcpChannel(channelId)
+            }
+        }
+    }
+
+    private fun closeTcpChannel(channelId: Int) {
+        val socket = tcpChannels.remove(channelId) ?: return
+        try { socket.close() } catch (_: Exception) {}
+        android.util.Log.d("FN-TCP", "[$channelId] Closed")
+    }
+
+    private fun closeTcpAll() {
+        tcpChannels.forEach { (id, socket) ->
+            try { socket.close() } catch (_: Exception) {}
+        }
+        tcpChannels.clear()
+        android.util.Log.d("FN-TCP", "All channels closed")
     }
 
     // ─── WiFi Direct Channel ───────────────────────────────────────────

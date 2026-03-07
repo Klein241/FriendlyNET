@@ -28,9 +28,11 @@ packages:
   bufferwave_core:
     dependency: "direct main"
     description:
-      path: "../bufferwave_core"
-      relative: true
-    source: path
+      path: "."
+      ref: main
+      resolved-ref: "5a0c12872e26a1a5c9488851e573ac1e8aa7c961"
+      url: "https://github.com/Klein241/bufferwave-core.git"
+    source: git
     version: "1.0.0"
   characters:
     dependency: transitive

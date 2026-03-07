@@ -12,7 +12,9 @@ dependencies:
 
   # ─── Moteur réseau BufferWave (API commune VPN) ───
   bufferwave_core:
-    path: ../bufferwave_core
+    git:
+      url: https://github.com/Klein241/bufferwave-core.git
+      ref: main
 
   # ─── État global ───
   provider: ^6.1.2

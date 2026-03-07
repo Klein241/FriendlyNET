@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:logger/logger.dart';
-import 'package:bufferwave_core/bufferwave_core.dart' show EdgeRelay, PacketCodec, FrameType;
+import 'package:bufferwave_core/bufferwave_core.dart' show EdgeRelay;
 import '../models/friend_peer.dart';
 import '../services/wifi_direct_service.dart';
 import '../services/e2e_service.dart';
@@ -537,6 +537,10 @@ class MeshProvider extends ChangeNotifier {
   }
 
   Future<void> stopHosting() async {
+    // Cleanup host relay + packet processor
+    _hostRelay?.dispose();
+    _hostRelay = null;
+    _relayChannel.setMethodCallHandler(null);
     try { await _relayChannel.invokeMethod('stopRelay'); } catch (_) {}
     await stopForegroundGuard();
     stopSearch();
@@ -551,15 +555,21 @@ class MeshProvider extends ChangeNotifier {
 
   void acceptGuest() {
     if (_pendingAsk != null) {
-      _send({
+      final guestId = _pendingAsk!.uid;
+      final accept = <String, dynamic>{
         'action': 'bridge_accept',
         'from': _nodeId,
-        'to': _pendingAsk!.uid,
+        'to': guestId,
         'label': _label,
-      });
+      };
+      if (_e2e.isReady) accept['pubKey'] = _e2e.publicKeyB64;
+      _send(accept);
       _bridge = _pendingAsk;
       _pendingAsk = null;
       _info = 'Connexion avec ${_bridge!.nickname}';
+      _notif.notifyConnected(_bridge!.nickname, asHost: true);
+      // Start relay tunnel for manual consent
+      _startHostRelayTunnel(guestId);
       notifyListeners();
     }
   }
@@ -588,6 +598,20 @@ class MeshProvider extends ChangeNotifier {
     if (!_recovering) {
       await startForegroundGuard();
       await requestBatteryExemption();
+
+      // Request VPN permission at runtime (Android shows system dialog)
+      try {
+        final hasVpnPermission = await _vpnChannel.invokeMethod('prepareVpn');
+        if (hasVpnPermission != true) {
+          _info = 'Permission VPN requise';
+          _phase = MeshPhase.broken;
+          notifyListeners();
+          return false;
+        }
+      } catch (e) {
+        _log.w('VPN permission check: $e');
+        // Continue anyway — startVpn will handle the permission dialog
+      }
     }
 
     // ─── Envoyer la demande de pont (avec clé publique E2E) ───
@@ -633,6 +657,10 @@ class MeshProvider extends ChangeNotifier {
   }
 
   Future<void> leaveFriend() async {
+    // Cleanup host relay if we were hosting
+    _hostRelay?.dispose();
+    _hostRelay = null;
+    _relayChannel.setMethodCallHandler(null);
     try { await _vpnChannel.invokeMethod('stopVpn'); } catch (_) {}
     await stopForegroundGuard();
     stopSearch();
@@ -777,7 +805,7 @@ class MeshProvider extends ChangeNotifier {
   EdgeRelay? _hostRelay;
 
   /// Connects host to Worker relay using EdgeRelay from bufferwave_core.
-  /// Receives guest's raw packets and forwards TCP to real Internet.
+  /// Receives guest's raw IP packets and forwards to native PacketProcessor.
   void _startHostRelayTunnel(String guestNodeId) {
     _hostRelay?.dispose();
 
@@ -797,42 +825,19 @@ class MeshProvider extends ChangeNotifier {
 
     _hostRelay!.onPaired = () {
       _log.i('Host relay ✅ paired with guest $guestNodeId');
-      _info = 'Relay actif — trafic en cours';
+      _info = 'Relay actif — trafic en transit';
       notifyListeners();
     };
 
     _hostRelay!.onData = (Uint8List data) {
-      // Données binaires du guest → analyser et forwarder
-      final frame = PacketCodec.decode(data);
-      if (frame == null) return;
+      // Raw IP packets from guest → forward to native PacketProcessor
+      if (data.isEmpty) return;
+      _relayChannel.invokeMethod('processPacket', {
+        'data': data.toList(),
+      }).catchError((_) {});
 
-      switch (frame.type) {
-        case FrameType.connect:
-          // Guest veut ouvrir une connexion TCP
-          final target = frame.connectTarget;
-          _log.d('Guest connect → ${target.host}:${target.port} ch=${frame.channelId}');
-          // Forward au relay natif pour ouverture TCP
-          _relayChannel.invokeMethod('forwardTcp', {
-            'channelId': frame.channelId,
-            'host': target.host,
-            'port': target.port,
-          }).catchError((_) {});
-          break;
-        case FrameType.data:
-          // Données TCP du guest → forward au socket natif
-          _relayChannel.invokeMethod('relayData', {
-            'channelId': frame.channelId,
-            'data': data.toList(),
-          }).catchError((_) {});
-          break;
-        case FrameType.close:
-          _relayChannel.invokeMethod('closeChannel', {
-            'channelId': frame.channelId,
-          }).catchError((_) {});
-          break;
-        default:
-          break;
-      }
+      // Update metrics
+      _sessionUpBytes += data.length;
     };
 
     _hostRelay!.onDisconnected = () {
@@ -840,6 +845,31 @@ class MeshProvider extends ChangeNotifier {
     };
 
     _hostRelay!.onError = (e) => _log.w('Host relay: $e');
+
+    // Listen for response packets from native PacketProcessor → send back to guest
+    _relayChannel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'responsePacket':
+          // Response IP packet from Internet → send back to guest via relay
+          final data = call.arguments['data'];
+          if (data != null && _hostRelay != null) {
+            final bytes = data is List<int>
+                ? Uint8List.fromList(data)
+                : Uint8List.fromList(List<int>.from(data));
+            _hostRelay!.sendBinary(bytes);
+            _sessionDownBytes += bytes.length;
+          }
+          break;
+        case 'metricsUpdate':
+          // Native metrics update
+          final bIn = call.arguments['bytesIn'] as int? ?? 0;
+          final bOut = call.arguments['bytesOut'] as int? ?? 0;
+          _sessionDownBytes = bIn;
+          _sessionUpBytes = bOut;
+          notifyListeners();
+          break;
+      }
+    });
 
     _hostRelay!.connect().then((ok) {
       _log.i('Host relay connect: ${ok ? "OK" : "FAIL"}');
