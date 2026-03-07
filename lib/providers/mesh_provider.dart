@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:logger/logger.dart';
+import 'package:bufferwave_core/bufferwave_core.dart' show EdgeRelay, PacketCodec, FrameType;
 import '../models/friend_peer.dart';
 import '../services/wifi_direct_service.dart';
 import '../services/e2e_service.dart';
@@ -769,42 +771,79 @@ class MeshProvider extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════
-  // HOST RELAY TUNNEL — Host connects to Worker
+  // HOST RELAY TUNNEL — Edge Relay Engine
   // ═══════════════════════════════════════════
 
-  WebSocketChannel? _hostRelayWs;
+  EdgeRelay? _hostRelay;
 
-  /// Connects the host to the Worker /tunnel endpoint
-  /// so the Guest's TUN packets can be relayed to us.
+  /// Connects host to Worker relay using EdgeRelay from bufferwave_core.
+  /// Receives guest's raw packets and forwards TCP to real Internet.
   void _startHostRelayTunnel(String guestNodeId) {
-    _hostRelayWs?.sink.close();
+    _hostRelay?.dispose();
 
     final workerBase = _bwApi.isInitialized
         ? _bwApi.workerBaseUrl
         : 'https://friendlynet-mesh.bufferwave.workers.dev';
-    final wsBase = workerBase.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://');
-    final relayUri = Uri.parse(
-      '$wsBase/tunnel?user=${Uri.encodeComponent(_nodeId)}&peer=${Uri.encodeComponent(guestNodeId)}&mode=tailscale',
+    final wsEndpoint = workerBase
+        .replaceFirst('https://', 'wss://')
+        .replaceFirst('http://', 'ws://');
+
+    _hostRelay = EdgeRelay(
+      endpoints: ['$wsEndpoint/tunnel'],
+      localId: _nodeId,
+      peerId: guestNodeId,
+      queryParams: {'mode': 'host'},
     );
 
-    _log.i('Host relay → $relayUri');
+    _hostRelay!.onPaired = () {
+      _log.i('Host relay ✅ paired with guest $guestNodeId');
+      _info = 'Relay actif — trafic en cours';
+      notifyListeners();
+    };
 
-    try {
-      _hostRelayWs = WebSocketChannel.connect(relayUri);
-      _hostRelayWs!.stream.listen(
-        (data) {
-          // Data from guest via Worker → forward to local relay / internet
-          _log.d('Host relay received ${data is List ? (data as List).length : data.toString().length} bytes from guest');
-          // For now, we log it. The actual internet forwarding
-          // is handled by the native TCP relay on port 8899.
-          // Guest packets come here → they need to go to internet.
-        },
-        onError: (e) => _log.w('Host relay error: $e'),
-        onDone: () => _log.i('Host relay closed'),
-      );
-    } catch (e) {
-      _log.e('Host relay connect fail: $e');
-    }
+    _hostRelay!.onData = (Uint8List data) {
+      // Données binaires du guest → analyser et forwarder
+      final frame = PacketCodec.decode(data);
+      if (frame == null) return;
+
+      switch (frame.type) {
+        case FrameType.connect:
+          // Guest veut ouvrir une connexion TCP
+          final target = frame.connectTarget;
+          _log.d('Guest connect → ${target.host}:${target.port} ch=${frame.channelId}');
+          // Forward au relay natif pour ouverture TCP
+          _relayChannel.invokeMethod('forwardTcp', {
+            'channelId': frame.channelId,
+            'host': target.host,
+            'port': target.port,
+          }).catchError((_) {});
+          break;
+        case FrameType.data:
+          // Données TCP du guest → forward au socket natif
+          _relayChannel.invokeMethod('relayData', {
+            'channelId': frame.channelId,
+            'data': data.toList(),
+          }).catchError((_) {});
+          break;
+        case FrameType.close:
+          _relayChannel.invokeMethod('closeChannel', {
+            'channelId': frame.channelId,
+          }).catchError((_) {});
+          break;
+        default:
+          break;
+      }
+    };
+
+    _hostRelay!.onDisconnected = () {
+      _log.w('Host relay disconnected — auto-reconnect');
+    };
+
+    _hostRelay!.onError = (e) => _log.w('Host relay: $e');
+
+    _hostRelay!.connect().then((ok) {
+      _log.i('Host relay connect: ${ok ? "OK" : "FAIL"}');
+    });
   }
 
   // ═══════════════════════════════════════════
