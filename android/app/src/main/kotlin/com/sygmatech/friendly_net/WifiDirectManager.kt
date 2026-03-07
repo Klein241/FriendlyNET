@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.wifi.p2p.*
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.os.Build
 import android.os.Looper
 import android.util.Log
@@ -66,7 +68,7 @@ class WifiDirectManager(private val context: Context) {
             Log.d(TAG, "WiFi Direct initialisé")
         } catch (e: Exception) {
             Log.e(TAG, "Erreur init WiFi Direct: ${e.message}")
-            onError?.call("WiFi Direct non disponible: ${e.message}")
+            onError?.invoke("WiFi Direct non disponible: ${e.message}")
         }
     }
 
@@ -95,7 +97,7 @@ class WifiDirectManager(private val context: Context) {
             override fun onFailure(reason: Int) {
                 val msg = wifiP2pErrorReason(reason)
                 Log.w(TAG, "Échec découverte WiFi Direct: $msg")
-                onError?.call("Découverte échouée: $msg")
+                onError?.invoke("Découverte échouée: $msg")
             }
         })
 
@@ -109,7 +111,7 @@ class WifiDirectManager(private val context: Context) {
     fun stopDiscovery() {
         val ch = channel ?: return
         manager.stopPeerDiscovery(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() = Log.d(TAG, "Découverte arrêtée")
+            override fun onSuccess() { Log.d(TAG, "Découverte arrêtée") }
             override fun onFailure(r: Int) {}
         })
         try {
@@ -140,8 +142,8 @@ class WifiDirectManager(private val context: Context) {
         )
 
         manager.addLocalService(ch, serviceInfo, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() = Log.d(TAG, "Service local DNS-SD enregistré")
-            override fun onFailure(r: Int) = Log.w(TAG, "Échec enregistrement service: $r")
+            override fun onSuccess() { Log.d(TAG, "Service local DNS-SD enregistré") }
+            override fun onFailure(r: Int) { Log.w(TAG, "Échec enregistrement service: $r") }
         })
     }
 
@@ -171,7 +173,7 @@ class WifiDirectManager(private val context: Context) {
                 if (current.none { it.mac == peer.mac }) {
                     current.add(peer)
                     _peers.value = current
-                    onPeersUpdated?.call(current)
+                    onPeersUpdated?.invoke(current)
                     Log.d(TAG, "Nouveau pair FriendlyNET: ${peer.name}")
                 }
             }
@@ -183,11 +185,11 @@ class WifiDirectManager(private val context: Context) {
         manager.addServiceRequest(ch, serviceRequest, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 manager.discoverServices(ch, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() = Log.d(TAG, "Découverte services lancée")
-                    override fun onFailure(r: Int) = Log.w(TAG, "Échec découverte services: $r")
+                    override fun onSuccess() { Log.d(TAG, "Découverte services lancée") }
+                    override fun onFailure(r: Int) { Log.w(TAG, "Échec découverte services: $r") }
                 })
             }
-            override fun onFailure(r: Int) = Log.w(TAG, "Échec ajout service request: $r")
+            override fun onFailure(r: Int) { Log.w(TAG, "Échec ajout service request: $r") }
         })
     }
 
@@ -216,7 +218,7 @@ class WifiDirectManager(private val context: Context) {
             override fun onFailure(reason: Int) {
                 val msg = wifiP2pErrorReason(reason)
                 Log.w(TAG, "Échec connexion WiFi Direct: $msg")
-                onError?.call("Connexion échouée: $msg")
+                onError?.invoke("Connexion échouée: $msg")
             }
         })
     }
@@ -253,7 +255,7 @@ class WifiDirectManager(private val context: Context) {
                             Log.d(TAG, "WiFi P2P activé")
                         } else {
                             Log.w(TAG, "WiFi P2P désactivé")
-                            onError?.call("WiFi Direct non disponible — activez le WiFi")
+                            onError?.invoke("WiFi Direct non disponible — activez le WiFi")
                         }
                     }
 
@@ -276,7 +278,7 @@ class WifiDirectManager(private val context: Context) {
                                 }
                             }
                             _peers.value = current
-                            onPeersUpdated?.call(current)
+                            onPeersUpdated?.invoke(current)
                         }
                     }
 
@@ -296,7 +298,7 @@ class WifiDirectManager(private val context: Context) {
                             val ownerIp = info.groupOwnerAddress?.hostAddress ?: ""
                             _connected.value = true
                             _groupOwnerAddress.value = ownerIp
-                            onConnected?.call(ownerIp)
+                            onConnected?.invoke(ownerIp)
                             Log.d(TAG, "Groupe WiFi Direct formé — owner: $ownerIp, isOwner: ${info.isGroupOwner}")
                         } else {
                             _connected.value = false

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/mesh_provider.dart';
 
@@ -7,12 +8,13 @@ import '../providers/mesh_provider.dart';
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
-  static const _bg = Color(0xFF0D0D1A);
+  static const _bg      = Color(0xFF0D0D1A);
   static const _surface = Color(0xFF161630);
   static const _outline = Color(0xFF2D2D50);
-  static const _purple = Color(0xFF6C63FF);
-  static const _mint = Color(0xFF00E5A0);
-  static const _orange = Color(0xFFFF9800);
+  static const _purple  = Color(0xFF6C63FF);
+  static const _mint    = Color(0xFF00E5A0);
+  static const _orange  = Color(0xFFFF9800);
+  static const _red     = Color(0xFFFF5252);
 
   @override
   Widget build(BuildContext context) {
@@ -33,6 +35,18 @@ class SettingsScreen extends StatelessWidget {
           body: ListView(
             padding: const EdgeInsets.all(20),
             children: [
+              // ─── Section : Statut réseau ───
+              _sectionTitle('🌐 Statut réseau'),
+              const SizedBox(height: 8),
+              _card(child: _networkStatusSection(prov)),
+              const SizedBox(height: 20),
+
+              // ─── Section : Sécurité E2E ───
+              _sectionTitle('🔐 Sécurité & Chiffrement'),
+              const SizedBox(height: 8),
+              _card(child: _e2eSection(context, prov)),
+              const SizedBox(height: 20),
+
               // ─── Section : Mode Économie de Data ───
               _sectionTitle('📡 Mode Éco-Data'),
               const SizedBox(height: 8),
@@ -398,6 +412,244 @@ class SettingsScreen extends StatelessWidget {
           style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
           textAlign: TextAlign.end)),
       ],
+    );
+  }
+
+  // ═══════════════════════════════════════════
+  // NOUVELLES SECTIONS
+  // ═══════════════════════════════════════════
+
+  /// Section : statut Worker Cloudflare + type de connexion détecté
+  Widget _networkStatusSection(MeshProvider prov) {
+    final online  = prov.workerOnline;
+    final bwMode  = prov.lowBandwidth;
+    final workerColor = online ? _mint : _red;
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Statut Worker
+          Row(
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: workerColor.withAlpha(20),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  online ? Icons.cloud_done : Icons.cloud_off,
+                  color: workerColor, size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      online ? 'Worker Cloudflare en ligne' : 'Worker hors ligne',
+                      style: TextStyle(
+                        color: workerColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      online
+                        ? 'bufferwave-tunnel.sfrfrfr.workers.dev'
+                        : 'Mode dégradé — WiFi Direct uniquement',
+                      style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              // Badge live
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: workerColor.withAlpha(20),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 6, height: 6,
+                      decoration: BoxDecoration(
+                        color: workerColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(online ? 'LIVE' : 'OFF',
+                      style: TextStyle(color: workerColor, fontSize: 9, fontWeight: FontWeight.w800)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Divider(color: _outline, height: 1),
+          const SizedBox(height: 14),
+          // Mode bande passante auto-détecté
+          Row(
+            children: [
+              Icon(
+                bwMode ? Icons.speed : Icons.network_check,
+                color: bwMode ? _orange : _mint,
+                size: 16,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  bwMode
+                    ? 'Débit lent détecté — Mode éco actif (auto)'
+                    : 'Débit normal — Mode standard actif',
+                  style: TextStyle(
+                    color: Colors.white.withAlpha(160),
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Le moniteur vérifie la latence toutes les 60s.\nSi RTT > 600ms ou perte > 40%, bascule auto en mode éco.',
+            style: TextStyle(color: Colors.white.withAlpha(70), fontSize: 10, height: 1.5),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Section : fingerprint E2E + bouton copier + explication
+  Widget _e2eSection(BuildContext context, MeshProvider prov) {
+    final fp    = prov.e2eFingerprint;
+    final ready = prov.e2eReady;
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // En-tête
+          Row(
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: _purple.withAlpha(20),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.lock, color: _purple, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      ready ? 'Chiffrement X25519 + AES-256-GCM' : 'Initialisation...',
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                    ),
+                    Text(
+                      'Protection anti-MITM entre pairs',
+                      style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              if (ready)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: _mint.withAlpha(20),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text('E2E ON',
+                    style: TextStyle(color: _mint, fontSize: 9, fontWeight: FontWeight.w800)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // Fingerprint
+          if (ready) ...[
+            Text('Ton fingerprint (8 hex)', style: TextStyle(color: Colors.white.withAlpha(80), fontSize: 11)),
+            const SizedBox(height: 6),
+            GestureDetector(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: fp));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text('Fingerprint copié !'),
+                    backgroundColor: _purple,
+                    duration: const Duration(seconds: 2),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: _purple.withAlpha(15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _purple.withAlpha(60)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      fp.isNotEmpty ? fp.replaceAllMapped(RegExp(r'.{2}'), (m) => '${m.group(0)} ').trim() : '????????',
+                      style: TextStyle(
+                        color: _purple,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 4,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    Icon(Icons.copy, color: _purple.withAlpha(120), size: 16),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _mint.withAlpha(8),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _mint.withAlpha(30)),
+              ),
+              child: Row(
+                children: [
+                  const Text('💡', style: TextStyle(fontSize: 14)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Compare ces 8 caractères avec ton ami.\n'
+                      'S\'ils correspondent → connexion sécurisée.',
+                      style: TextStyle(color: _mint.withAlpha(200), fontSize: 10, height: 1.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            const Center(
+              child: SizedBox(
+                width: 24, height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

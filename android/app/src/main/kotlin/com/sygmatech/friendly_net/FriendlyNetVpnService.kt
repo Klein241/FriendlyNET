@@ -65,7 +65,7 @@ class FriendlyNetVpnService : VpnService() {
     // Config reçue de Flutter
     private var nodeId           = ""
     private var userId           = ""
-    private var workerUrl        = "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
+    private var workerUrl        = ""
     private var tunnelKey        = ""
     private var keepaliveInterval = 15L
     private var lowBandwidth     = false
@@ -103,15 +103,20 @@ class FriendlyNetVpnService : VpnService() {
         // Extraire la config
         nodeId            = intent?.getStringExtra(EXTRA_NODE_ID)    ?: ""
         userId            = intent?.getStringExtra(EXTRA_USER_ID)    ?: ""
-        workerUrl         = intent?.getStringExtra(EXTRA_WORKER_URL) ?: "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel"
+        workerUrl         = intent?.getStringExtra(EXTRA_WORKER_URL) ?: ""
         tunnelKey         = intent?.getStringExtra(EXTRA_TUNNEL_KEY) ?: ""
         keepaliveInterval = (intent?.getIntExtra(EXTRA_KEEPALIVE, 15) ?: 15).toLong()
         lowBandwidth      = intent?.getBooleanExtra(EXTRA_LOW_BW, false) ?: false
         localIp           = intent?.getStringExtra(EXTRA_LOCAL_IP)
 
         if (running.get()) {
-            Log.d(TAG, "VPN déjà actif — ignoré")
+            Log.d(TAG, "Tunnel déjà actif — ignoré")
             return START_STICKY
+        }
+
+        if (workerUrl.isEmpty() && localIp == null) {
+            Log.e(TAG, "Aucune configuration tunnel fournie — abandon")
+            return START_NOT_STICKY
         }
 
         startForeground(NOTIF_ID, buildNotification("FriendlyNET — Connexion...", "Sélection du meilleur chemin..."))
@@ -209,7 +214,7 @@ class FriendlyNetVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setSession("FriendlyNET")
+                .setSession("FriendlyNET Secure")
                 .establish()
         } catch (e: Exception) {
             Log.e(TAG, "Erreur création TUN: ${e.message}")
@@ -281,10 +286,10 @@ class FriendlyNetVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "FriendlyNET VPN",
+                "FriendlyNET — Mode Sécurisé",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Tunnel VPN FriendlyNET actif"
+                description = "Protection réseau FriendlyNET active"
                 setShowBadge(false)
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)

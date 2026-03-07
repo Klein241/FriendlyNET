@@ -5,8 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:logger/logger.dart';
 import '../models/friend_peer.dart';
 import '../services/wifi_direct_service.dart';
+import '../services/e2e_service.dart';
+import '../services/connectivity_monitor.dart';
+import '../services/bufferwave_api_service.dart';
 
 /// Orchestrateur principal de FriendlyNET.
 ///
@@ -24,30 +28,32 @@ import '../services/wifi_direct_service.dart';
 ///   ultra-léger (48 bytes / 45 sec). Jean continue YouTube via Marie.
 class MeshProvider extends ChangeNotifier {
   // ─── Constantes ───
-  static const _meshEndpoint = 'wss://bufferwave-tunnel.sfrfrfr.workers.dev/mesh';
-  static const _prefNodeId = 'fn_node_id';
-  static const _prefName = 'fn_display_name';
-  static const _prefPeers = 'fn_cached_peers';
+  static const _prefNodeId  = 'fn_node_id';
+  static const _prefName    = 'fn_display_name';
+  static const _prefPeers   = 'fn_cached_peers';
   static const _prefConsent = 'fn_auto_consent';
-  static const _prefLowBw = 'fn_low_bandwidth';
+  static const _prefLowBw   = 'fn_low_bandwidth';
+
+  // Logger
+  static final _log = Logger(
+    printer: SimplePrinter(colors: false),
+    level: Level.debug,
+  );
 
   // ─── Channels natifs ───
-  static const _vpnChannel = MethodChannel('friendlynet/vpn');
-  static const _relayChannel = MethodChannel('friendlynet/relay');
+  static const _vpnChannel    = MethodChannel('friendlynet/vpn');
+  static const _relayChannel  = MethodChannel('friendlynet/relay');
   static const _systemChannel = MethodChannel('friendlynet/system');
 
   // ─── État ───
-  FriendRole _role = FriendRole.idle;
-  MeshPhase _phase = MeshPhase.dormant;
-  String _label = '';
+  FriendRole  _role  = FriendRole.idle;
+  MeshPhase   _phase = MeshPhase.dormant;
+  String _label  = '';
   String _nodeId = '';
-  String _info = 'Bienvenue sur FriendlyNET';
-  bool _ready = false;
+  String _info   = 'Bienvenue sur FriendlyNET';
+  bool   _ready  = false;
 
-  // Auto-consent (case cochée = accepter automatiquement)
-  bool _autoConsent = false;
-
-  // Low Bandwidth Mode
+  bool _autoConsent  = false;
   bool _lowBandwidth = false;
 
   // Pairs
@@ -57,7 +63,7 @@ class MeshProvider extends ChangeNotifier {
 
   // Mesh socket
   WebSocketChannel? _ws;
-  bool _meshActive = false;
+  bool   _meshActive = false;
   Timer? _heartbeat;
   Timer? _refresh;
 
@@ -65,12 +71,12 @@ class MeshProvider extends ChangeNotifier {
   SessionMetrics _metrics = const SessionMetrics();
   Timer? _metricsTick;
 
-  // Reconnexion renforcée (survie Orange throttle)
+  // Reconnexion renforcée
   Timer? _recoveryTimer;
   int _recoveryN = 0;
   FriendPeer? _lastBridge;
   bool _recovering = false;
-  static const int _maxRecoveryAttempts = 20; // Plus agressif que 8
+  static const int _maxRecoveryAttempts = 20;
 
   // WebSocket health monitoring
   Timer? _wsHealthCheck;
@@ -79,36 +85,51 @@ class MeshProvider extends ChangeNotifier {
   // WiFi Direct
   final WifiDirectService _wifiDirect = WifiDirectService();
   List<WifiDirectPeer> _wifiPeers = [];
-  bool _wifiDirectActive = false;
-  String _wifiDirectIp = '';
+  bool   _wifiDirectActive = false;
+  String _wifiDirectIp     = '';
+
+  // ─── Nouveaux services ───
+  final E2EService             _e2e      = E2EService();
+  final ConnectivityMonitor    _connMon  = ConnectivityMonitor();
+  final BufferwaveApiService   _bwApi    = BufferwaveApiService();
+  Timer? _bwHeartbeatTimer;
 
   // ─── Getters ───
-  FriendRole get role => _role;
-  MeshPhase get phase => _phase;
-  String get displayName => _label;
-  String get nodeId => _nodeId;
-  String get statusLine => _info;
-  bool get isReady => _ready;
+  FriendRole get role        => _role;
+  MeshPhase  get phase       => _phase;
+  String get displayName     => _label;
+  String get nodeId          => _nodeId;
+  String get statusLine      => _info;
+  bool   get isReady         => _ready;
   List<FriendPeer> get friends => List.from(_friends);
-  FriendPeer? get bridge => _bridge;
+  FriendPeer? get bridge     => _bridge;
   FriendPeer? get pendingAsk => _pendingAsk;
   SessionMetrics get metrics => _metrics;
-  bool get autoConsent => _autoConsent;
-  bool get lowBandwidth => _lowBandwidth;
+  bool get autoConsent       => _autoConsent;
+  bool get lowBandwidth      => _lowBandwidth;
 
-  bool get isIdle => _role == FriendRole.idle;
-  bool get isHosting => _role == FriendRole.host;
-  bool get isGuest => _role == FriendRole.guest && _phase == MeshPhase.live;
+  bool get isIdle     => _role == FriendRole.idle;
+  bool get isHosting  => _role == FriendRole.host;
+  bool get isGuest    => _role == FriendRole.guest && _phase == MeshPhase.live;
   bool get isSearching => _meshActive;
 
   // WiFi Direct getters
-  List<WifiDirectPeer> get wifiPeers => List.from(_wifiPeers);
-  bool get wifiDirectActive => _wifiDirectActive;
-  String get wifiDirectIp => _wifiDirectIp;
+  List<WifiDirectPeer> get wifiPeers      => List.from(_wifiPeers);
+  bool   get wifiDirectActive             => _wifiDirectActive;
+  String get wifiDirectIp                 => _wifiDirectIp;
 
-  // Intervalles adaptatifs selon le mode
+  // E2E getters
+  String get e2eFingerprint => _e2e.fingerprint;
+  bool   get e2eReady       => _e2e.isReady;
+  bool   get workerOnline   => _bwApi.isWorkerOnline;
+
+  // Intervalles adaptatifs
   int get _heartbeatSec => _lowBandwidth ? 45 : 15;
-  int get _refreshSec => _lowBandwidth ? 30 : 5;
+  int get _refreshSec   => _lowBandwidth ? 30 : 5;
+  // Mesh endpoint (depuis BufferwaveApiService ou fallback)
+  String get _meshEndpoint => _bwApi.isInitialized
+      ? _bwApi.meshWssUrl
+      : 'wss://bufferwave-tunnel.sfrfrfr.workers.dev/mesh';
 
   // ═══════════════════════════════════════════
   // INITIALISATION
@@ -117,15 +138,46 @@ class MeshProvider extends ChangeNotifier {
   Future<void> bootstrap() async {
     if (_ready) return;
     final prefs = await SharedPreferences.getInstance();
-    _label = prefs.getString(_prefName) ?? '';
-    _nodeId = prefs.getString(_prefNodeId) ?? '';
-    _autoConsent = prefs.getBool(_prefConsent) ?? false;
-    _lowBandwidth = prefs.getBool(_prefLowBw) ?? false;
+    _label        = prefs.getString(_prefName)    ?? '';
+    _nodeId       = prefs.getString(_prefNodeId)  ?? '';
+    _autoConsent  = prefs.getBool(_prefConsent)   ?? false;
+    _lowBandwidth = prefs.getBool(_prefLowBw)     ?? false;
     if (_nodeId.isEmpty) {
       _nodeId = _makeNodeId();
       await prefs.setString(_prefNodeId, _nodeId);
     }
     await _loadCachedFriends();
+
+    // ─── Init E2E (génère la paire de clés X25519 locale) ───
+    await _e2e.initialize();
+    _log.i('E2E prêt — fingerprint: ${_e2e.fingerprint}');
+
+    // ─── Init BufferWave API (health-check Worker + DoH) ───
+    unawaited(_bwApi.initialize(_nodeId).then((_) {
+      if (_bwApi.isWorkerOnline) {
+        _startBwHeartbeat();
+      } else {
+        _log.w('Worker Cloudflare hors ligne — mode dégradé local');
+      }
+      notifyListeners();
+    }));
+
+    // ─── Init ConnectivityMonitor (auto-détection throttle) ───
+    _connMon.onLowBandwidth = (isLow) {
+      if (isLow != _lowBandwidth) {
+        _log.i('Auto low-bandwidth: $isLow');
+        setLowBandwidth(isLow);
+        _info = isLow
+            ? '⚠️ Débit faible détecté — mode éco activé'
+            : '✅ Débit restauré — mode normal';
+        notifyListeners();
+      }
+    };
+    _connMon.onStatusMessage = (msg) {
+      _log.d('Réseau: $msg');
+    };
+    unawaited(_connMon.start());
+
     _ready = true;
     notifyListeners();
   }
@@ -503,11 +555,11 @@ class MeshProvider extends ChangeNotifier {
     if (_role != FriendRole.idle && !_recovering) return false;
 
     if (!_recovering) {
-      _role = FriendRole.guest;
+      _role  = FriendRole.guest;
       _phase = MeshPhase.handshake;
     }
     _bridge = host;
-    _info = 'Connexion vers ${host.nickname}...';
+    _info   = 'Connexion vers ${host.nickname}...';
     notifyListeners();
 
     // Protection Android
@@ -516,32 +568,34 @@ class MeshProvider extends ChangeNotifier {
       await requestBatteryExemption();
     }
 
-    // Envoyer la demande de pont
-    _send({
+    // ─── Envoyer la demande de pont (avec clé publique E2E) ───
+    final offer = <String, dynamic>{
       'action': 'bridge_offer',
-      'from': _nodeId,
-      'to': host.uid,
-      'label': _label,
-    });
+      'from':   _nodeId,
+      'to':     host.uid,
+      'label':  _label,
+    };
+    if (_e2e.isReady) offer['pubKey'] = _e2e.publicKeyB64;
+    _send(offer);
 
-    // Démarrer le tunnel VPN avec mode low bandwidth
+    // Démarrer le tunnel VPN
     try {
       final ok = await _vpnChannel.invokeMethod('startVpn', {
-        'nodeId': host.uid,
-        'userId': _nodeId,
-        'killSwitch': false,
-        'localProxy': true,
-        'proxyHost': host.meshIp.isNotEmpty ? host.meshIp : host.uid,
-        'proxyPort': 8899,
-        'workerUrl': 'wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel',
-        'tunnelKey': '',
-        'lowBandwidth': _lowBandwidth,
+        'nodeId':            host.uid,
+        'userId':            _nodeId,
+        'killSwitch':        false,
+        'localProxy':        true,
+        'proxyHost':         host.meshIp.isNotEmpty ? host.meshIp : host.uid,
+        'proxyPort':         8899,
+        'workerUrl':         'wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel',
+        'tunnelKey':         '',
+        'lowBandwidth':      _lowBandwidth,
         'keepaliveInterval': _lowBandwidth ? 45 : 15,
       });
 
       if (ok == true) {
         _phase = MeshPhase.live;
-        _info = 'Internet via ${host.nickname} ✓';
+        _info  = 'Internet via ${host.nickname} ✓';
         if (!_recovering) _startMetrics();
         notifyListeners();
         return true;
@@ -551,7 +605,7 @@ class MeshProvider extends ChangeNotifier {
     }
 
     _phase = MeshPhase.broken;
-    _info = 'Impossible d\'établir le tunnel';
+    _info  = 'Impossible d\'établir le tunnel';
     notifyListeners();
     return false;
   }
@@ -635,33 +689,52 @@ class MeshProvider extends ChangeNotifier {
 
   void _handleBridgeOffer(Map<String, dynamic> data) {
     if (_role != FriendRole.host) return;
-    final from = data['from'] as String? ?? '';
+    final from  = data['from']  as String? ?? '';
     final label = data['label'] as String? ?? 'Quelqu\'un';
     if (from == _nodeId) return;
 
-    // AUTO-CONSENT : accepter automatiquement si la case est cochée
-    if (_autoConsent) {
-      _send({
-        'action': 'bridge_accept',
-        'from': _nodeId,
-        'to': from,
-        'label': _label,
+    // ─── E2E : dériver la clé partagée avec l'invité ───
+    final peerPubKey = data['pubKey'] as String?;
+    if (peerPubKey != null && E2EService.isValidPublicKey(peerPubKey) && _e2e.isReady) {
+      _e2e.deriveSharedKey(peerPubKey, from).then((ok) {
+        _log.i('E2E session avec $from : ${ok ? "✅ établie" : "❌ échec"}');
       });
+    }
+
+    // AUTO-CONSENT
+    if (_autoConsent) {
+      final accept = <String, dynamic>{
+        'action': 'bridge_accept',
+        'from':   _nodeId,
+        'to':     from,
+        'label':  _label,
+      };
+      if (_e2e.isReady) accept['pubKey'] = _e2e.publicKeyB64;
+      _send(accept);
       _bridge = FriendPeer(uid: from, nickname: label, hosting: false, online: true);
-      _info = '$label connecté automatiquement ✓';
+      _info   = '$label connecté automatiquement ✓';
       notifyListeners();
       return;
     }
 
-    // Sinon, afficher la demande pour approbation manuelle
     _pendingAsk = FriendPeer(uid: from, nickname: label, hosting: false, online: true);
-    _info = '$label souhaite utiliser votre connexion';
+    _info       = '$label souhaite utiliser votre connexion';
     notifyListeners();
   }
 
   void _handleBridgeAccept(Map<String, dynamic> data) {
     if (_role != FriendRole.guest) return;
-    _info = 'Pont accepté !';
+
+    // ─── E2E : dériver la clé partagée avec l'hôte ───
+    final hostId     = data['from']   as String? ?? '';
+    final peerPubKey = data['pubKey'] as String?;
+    if (peerPubKey != null && E2EService.isValidPublicKey(peerPubKey) && _e2e.isReady && hostId.isNotEmpty) {
+      _e2e.deriveSharedKey(peerPubKey, hostId).then((ok) {
+        _log.i('E2E session avec hôte $hostId : ${ok ? "✅ établie" : "❌ échec"}');
+      });
+    }
+
+    _info = 'Pont accepté — tunnel en cours...';
     notifyListeners();
   }
 
@@ -830,12 +903,23 @@ class MeshProvider extends ChangeNotifier {
   // UTILITAIRES
   // ═══════════════════════════════════════════
 
+  // ═══════════════════════════════════════════
+  // BUFFERWAVE API HEARTBEAT
+  // ═══════════════════════════════════════════
+
+  void _startBwHeartbeat() {
+    _bwHeartbeatTimer?.cancel();
+    // Heartbeat API toutes les 5 min (indépendant du mesh WS)
+    _bwHeartbeatTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      _bwApi.heartbeat(_nodeId);
+    });
+  }
+
   void _send(Map<String, dynamic> msg) {
     try { _ws?.sink.add(jsonEncode(msg)); } catch (_) {}
   }
 
   void _autoRejoin() {
-    // En mode low bandwidth, attendre plus longtemps avant de réessayer
     final delay = _lowBandwidth ? 15 : 5;
     Future.delayed(Duration(seconds: delay), () {
       if (!_meshActive && _role != FriendRole.idle) {
@@ -873,9 +957,9 @@ class MeshProvider extends ChangeNotifier {
   Future<void> _loadCachedFriends() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getStringList(_prefPeers) ?? [];
+      final raw   = prefs.getStringList(_prefPeers) ?? [];
       for (final str in raw) {
-        final m = jsonDecode(str) as Map<String, dynamic>;
+        final m    = jsonDecode(str) as Map<String, dynamic>;
         final peer = FriendPeer.unpack(m);
         if (!_friends.any((f) => f.uid == peer.uid)) {
           _friends.add(peer.refresh(online: false));
@@ -886,10 +970,10 @@ class MeshProvider extends ChangeNotifier {
 
   NetKind _parseNet(String raw) {
     switch (raw.toLowerCase()) {
-      case '4g': case 'lte': return NetKind.lte;
-      case '5g': case 'nr': return NetKind.fiveG;
+      case '4g': case 'lte':  return NetKind.lte;
+      case '5g': case 'nr':   return NetKind.fiveG;
       case 'wifi': case 'wlan': return NetKind.wifi;
-      default: return NetKind.offline;
+      default:                  return NetKind.offline;
     }
   }
 
@@ -906,6 +990,11 @@ class MeshProvider extends ChangeNotifier {
     _metricsTick?.cancel();
     _recoveryTimer?.cancel();
     _wsHealthCheck?.cancel();
+    // ─── Nettoyage nouveaux services ───
+    _connMon.stop();
+    _bwHeartbeatTimer?.cancel();
+    _bwApi.deregisterNode(_nodeId);
+    _e2e.clearAllSessions();
     super.dispose();
   }
 }

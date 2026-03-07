@@ -1,7 +1,7 @@
 name: friendly_net
 description: FriendlyNET — Partage Internet coopératif entre amis, sans frontières.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ^3.5.0
@@ -10,23 +10,30 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Moteur réseau BufferWave (partagé avec l'app VPN)
+  # ─── Moteur réseau BufferWave (API commune VPN) ───
   bufferwave_core:
     path: ../bufferwave_core
 
-  # État global
+  # ─── État global ───
   provider: ^6.1.2
 
-  # Réseau
+  # ─── Réseau ───
   web_socket_channel: ^3.0.0
   http: ^1.2.0
 
-  # Persistance
+  # ─── Persistance ───
   shared_preferences: ^2.2.0
 
-  # Système
+  # ─── Système ───
   connectivity_plus: ^5.0.2
   permission_handler: ^11.0.0
+
+  # ─── Sécurité E2E ───
+  # X25519 ECDH + AES-256-GCM pour chiffrement pairs
+  cryptography: ^2.7.0
+
+  # ─── Monitoring & Logs ───
+  logger: ^2.4.0
 
 dev_dependencies:
   flutter_test:

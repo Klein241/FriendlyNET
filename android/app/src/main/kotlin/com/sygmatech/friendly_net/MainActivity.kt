@@ -122,6 +122,9 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    // ─── DNS Relay Instance ───
+    private var dnsRelay: DnsRelayEngine? = null
+
     // ─── Relay Service ─────────────────────────────────────────────────
     private fun setupRelayChannel(engine: FlutterEngine) {
         MethodChannel(engine.dartExecutor.binaryMessenger, RELAY_CHANNEL)
@@ -134,13 +137,37 @@ class MainActivity : FlutterActivity() {
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i)
                         else startService(i)
+
+                        // Start DNS relay alongside TCP relay
+                        if (dnsRelay == null) dnsRelay = DnsRelayEngine()
+                        dnsRelay?.start()
+
                         result.success(true)
                     }
                     "stopRelay" -> {
                         startService(Intent(this, FriendlyNetRelayService::class.java).apply {
                             putExtra(FriendlyNetRelayService.EXTRA_STOP, true)
                         })
+
+                        // Stop DNS relay alongside TCP relay
+                        dnsRelay?.stop()
+
                         result.success(true)
+                    }
+                    "startDns" -> {
+                        if (dnsRelay == null) dnsRelay = DnsRelayEngine()
+                        dnsRelay?.start()
+                        result.success(true)
+                    }
+                    "stopDns" -> {
+                        dnsRelay?.stop()
+                        result.success(true)
+                    }
+                    "relayStatus" -> {
+                        result.success(mapOf(
+                            "dnsRunning" to (dnsRelay?.isRunning ?: false),
+                            "dnsCacheSize" to (dnsRelay?.cacheSize ?: 0),
+                        ))
                     }
                     else -> result.notImplemented()
                 }
@@ -247,8 +274,7 @@ class MainActivity : FlutterActivity() {
         val i = Intent(this, FriendlyNetVpnService::class.java).apply {
             putExtra(FriendlyNetVpnService.EXTRA_NODE_ID,    args["nodeId"]    as? String ?: "")
             putExtra(FriendlyNetVpnService.EXTRA_USER_ID,    args["userId"]    as? String ?: "")
-            putExtra(FriendlyNetVpnService.EXTRA_WORKER_URL, args["workerUrl"] as? String
-                ?: "wss://bufferwave-tunnel.sfrfrfr.workers.dev/tunnel")
+            putExtra(FriendlyNetVpnService.EXTRA_WORKER_URL, args["workerUrl"] as? String ?: "")
             putExtra(FriendlyNetVpnService.EXTRA_TUNNEL_KEY, args["tunnelKey"] as? String ?: "")
             putExtra(FriendlyNetVpnService.EXTRA_KEEPALIVE,  (args["keepaliveInterval"] as? Int) ?: 15)
             putExtra(FriendlyNetVpnService.EXTRA_LOW_BW,     (args["lowBandwidth"] as? Boolean) ?: false)
