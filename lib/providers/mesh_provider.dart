@@ -9,7 +9,8 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:logger/logger.dart';
-import 'package:bufferwave_core/bufferwave_core.dart' show EdgeRelay;
+// ✅ CORRIGÉ — bufferwave_core supprimé, HostRelay natif Dart
+import '../services/host_relay.dart';
 import 'package:flutter_p2p_connection/flutter_p2p_connection.dart' show BleDiscoveredDevice, HotspotHostState;
 import '../models/friend_peer.dart';
 import '../services/wifi_direct_service.dart';
@@ -974,34 +975,31 @@ class MeshProvider extends ChangeNotifier {
   }
 
   // ═══════════════════════════════════════════
-  // HOST RELAY TUNNEL — Edge Relay Engine
+  // HOST RELAY TUNNEL — HostRelay natif Dart
+  // ✅ CORRIGÉ — remplace EdgeRelay de bufferwave_core
   // ═══════════════════════════════════════════
 
-  EdgeRelay? _hostRelay;
+  HostRelay? _hostRelay;
 
-  /// Connects host to Worker relay using EdgeRelay from bufferwave_core.
-  /// Receives guest's raw IP packets and forwards to native PacketProcessor.
+  /// Connecte le host au Worker relay via HostRelay natif.
+  /// URL exacte : user=HOST&peer=GUEST → Worker pair les deux WS.
+  /// HostRelay gère la reconnexion automatique en interne.
   void _startHostRelayTunnel(String guestNodeId) {
     _hostRelay?.dispose();
 
-    final workerBase = _bwApi.isInitialized
-        ? _bwApi.workerBaseUrl
-        : 'https://friendlynet-mesh.bufferwave.workers.dev';
-    final wsBase = workerBase
-        .replaceFirst('https://', 'wss://')
-        .replaceFirst('http://', 'ws://');
-
-    // ✅ CORRIGÉ — user=HOST_NODEID & peer=GUEST_NODEID dans l'URL
-    // Le Worker cherche la clé "HOST→GUEST" dans relayWaiting
-    // TailscaleMode (guest) se connecte avec user=GUEST&peer=HOST
-    // Le Worker trouve "HOST→GUEST" == partnerKey de "GUEST→HOST" ✅
+    // ✅ CORRIGÉ — URL exacte avec user= et peer=
+    // Worker cherche partnerKey = "GUEST→HOST"
+    // TailscaleMode (guest) crée myKey = "GUEST→HOST"
+    // → pairing immédiat
+    const wsBase = 'wss://friendlynet-mesh.bufferwave.workers.dev';
     final tunnelUrl = '$wsBase/tunnel?user=$_nodeId&peer=$guestNodeId&mode=host';
 
-    _hostRelay = EdgeRelay(
-      endpoints: [tunnelUrl],
+    _log.i('[HostRelay] Connexion à $tunnelUrl');
+
+    _hostRelay = HostRelay(
+      tunnelUrl: tunnelUrl,
       localId: _nodeId,
       peerId: guestNodeId,
-      queryParams: {},  // ✅ CORRIGÉ — vide, tout est déjà dans l'URL
     );
 
     _hostRelay!.onPaired = () {
@@ -1020,51 +1018,34 @@ class MeshProvider extends ChangeNotifier {
     };
 
     _hostRelay!.onDisconnected = () {
-      _log.w('Host relay déconnecté — tentative reconnexion');
-      // ✅ CORRIGÉ — auto-reconnect si toujours host
-      if (_role == FriendRole.host && _bridge != null) {
-        Future.delayed(const Duration(seconds: 3), () {
-          if (_role == FriendRole.host && _bridge != null) {
-            _startHostRelayTunnel(guestNodeId);
-          }
-        });
-      }
+      _log.w('Host relay déconnecté');
+      // HostRelay gère la reconnexion automatique en interne
     };
 
     _hostRelay!.onError = (e) => _log.w('Host relay erreur: $e');
 
-    // Listen for response packets from native relay → send back to guest
+    // Réponses du service natif → renvoyer au guest via relay
     _relayChannel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'responsePacket':
-          final data = call.arguments['data'];
-          if (data != null && _hostRelay != null) {
-            final bytes = data is List<int>
-                ? Uint8List.fromList(data)
-                : Uint8List.fromList(List<int>.from(data));
+          final rawData = call.arguments['data'];
+          if (rawData != null && _hostRelay != null) {
+            final bytes = rawData is List<int>
+                ? Uint8List.fromList(rawData)
+                : Uint8List.fromList(List<int>.from(rawData as List));
             _hostRelay!.sendBinary(bytes);
             _sessionDownBytes += bytes.length;
           }
           break;
         case 'metricsUpdate':
           _sessionDownBytes = call.arguments['bytesIn'] as int? ?? 0;
-          _sessionUpBytes = call.arguments['bytesOut'] as int? ?? 0;
+          _sessionUpBytes   = call.arguments['bytesOut'] as int? ?? 0;
           notifyListeners();
           break;
       }
     });
 
-    _hostRelay!.connect().then((ok) {
-      _log.i('Host relay connect: ${ok ? "OK ✅" : "ÉCHEC ❌"}');
-      // ✅ CORRIGÉ — retry si connect échoue
-      if (!ok) {
-        Future.delayed(const Duration(seconds: 5), () {
-          if (_role == FriendRole.host && _bridge != null) {
-            _startHostRelayTunnel(guestNodeId);
-          }
-        });
-      }
-    });
+    _hostRelay!.connect();
   }
 
   // ═══════════════════════════════════════════

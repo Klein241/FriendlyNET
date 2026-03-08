@@ -10,11 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # ─── Moteur réseau BufferWave (API commune VPN) ───
-  bufferwave_core:
-    git:
-      url: https://github.com/Klein241/bufferwave-core.git
-      ref: main
+  # ✅ CORRIGÉ — bufferwave_core supprimé, remplacé par HostRelay natif
 
   # ─── WiFi Direct P2P réel (Hotspot + BLE discovery) ───
   flutter_p2p_connection:

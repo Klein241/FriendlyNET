@@ -1,18 +1,21 @@
-import 'package:bufferwave_core/bufferwave_core.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:logger/logger.dart';
 
 /// ════════════════════════════════════════════════════════════════
-/// BufferwaveApiService — Pont FriendlyNET ↔ bufferwave_core
+/// BufferwaveApiService — Version autonome sans bufferwave_core
 ///
-/// Utilise les vraies API statiques de BufferWaveApi et DohResolver:
-///   - BufferWaveApi.healthCheck()     → santé du Worker Cloudflare
-///   - BufferWaveApi.registerNode()    → enregistrement mesh
-///   - BufferWaveApi.heartbeat()       → keepalive API
-///   - DohResolver.resolve()           → DNS-over-HTTPS (anti-blocage FAI)
+/// ✅ CORRIGÉ — Plus de dépendance à bufferwave_core.
+/// Utilise http natif pour communiquer avec le Worker Cloudflare.
 ///
-/// Avantage "Orange 100 Mo" :
-///   Le DoH résout les domaines via HTTPS (port 443) au lieu du DNS
-///   standard (port 53, bloqué/espionné quand le forfait est épuisé).
+/// Fonctionnalités conservées :
+///   - Health check du Worker
+///   - Heartbeat keepalive
+///   - Enregistrement/désenregistrement nœud
+///
+/// Fonctionnalités retirées :
+///   - DoH (DNS-over-HTTPS) → pas utilisé en pratique,
+///     le mesh se connecte directement au domaine Workers
 /// ════════════════════════════════════════════════════════════════
 class BufferwaveApiService {
   static final _log = Logger(
@@ -28,9 +31,6 @@ class BufferwaveApiService {
   bool get isInitialized   => _initialized;
   bool get isWorkerOnline  => _workerHealthy;
 
-  // DoH Resolver (singleton bufferwave_core)
-  final _doh = DohResolver();
-
   // ═══════════════════════════════════════════
   // INITIALISATION
   // ═══════════════════════════════════════════
@@ -38,63 +38,11 @@ class BufferwaveApiService {
   Future<void> initialize(String nodeId) async {
     if (_initialized) return;
 
-    // 1. Pointer le BufferWaveApi sur notre Worker
-    BufferWaveApi.setBaseUrl(_workerBase);
-
-    // 2. Activer DoH (résolution DNS via HTTPS — protège contre blocage FAI)
-    _doh.setEndpoint('$_workerBase/resolve');
-    _doh.enable();
-
-    // 3. Vérifier la santé du Worker
-    _workerHealthy = await BufferWaveApi.healthCheck();
+    // 1. Vérifier la santé du Worker
+    _workerHealthy = await checkHealth();
     _log.i('Worker ${_workerHealthy ? "✅ en ligne" : "⚠️ hors ligne (mode dégradé)"}');
 
-    // 4. Enregistrer le nœud si Worker disponible
-    if (_workerHealthy) {
-      try {
-        await BufferWaveApi.registerNode(
-          userId: nodeId,
-          country: 'auto',
-          bandwidthMbps: 5.0,
-        );
-        _log.i('Nœud $nodeId enregistré sur le mesh BufferWave');
-      } catch (e) {
-        _log.w('Enregistrement nœud échoué: $e');
-      }
-    }
-
     _initialized = true;
-  }
-
-  // ═══════════════════════════════════════════
-  // DOH — DNS-OVER-HTTPS
-  // ═══════════════════════════════════════════
-
-  /// Résout un hostname via DoH (bypasse les blocages DNS du FAI).
-  /// Utile avant d'ouvrir le WebSocket mesh : si DNS bloqué, utilise
-  /// l'IP directe hardcodée comme fallback.
-  Future<String?> resolveDoH(String hostname) async {
-    try {
-      final ips = await _doh.resolve(hostname);
-      if (ips.isNotEmpty) {
-        _log.d('DoH: $hostname → ${ips.first}');
-        return ips.first;
-      }
-    } catch (e) {
-      _log.w('DoH échec ($hostname): $e');
-    }
-    return null;
-  }
-
-  // ═══════════════════════════════════════════
-  // HEARTBEAT API BUFFERWAVE
-  // ═══════════════════════════════════════════
-
-  /// Heartbeat vers l'API BufferWave (garde le nœud enregistré).
-  Future<void> heartbeat(String nodeId) async {
-    try {
-      await BufferWaveApi.heartbeat(nodeId);
-    } catch (_) {}
   }
 
   // ═══════════════════════════════════════════
@@ -102,24 +50,60 @@ class BufferwaveApiService {
   // ═══════════════════════════════════════════
 
   Future<bool> checkHealth() async {
-    _workerHealthy = await BufferWaveApi.healthCheck();
-    _log.d('Health check: ${_workerHealthy ? "OK" : "FAIL"}');
-    return _workerHealthy;
+    try {
+      final resp = await http
+          .get(Uri.parse('$_workerBase/health'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        _workerHealthy = data['ok'] == true;
+        _log.d('Health check: ${_workerHealthy ? "OK" : "FAIL"}');
+        return _workerHealthy;
+      }
+    } catch (e) {
+      _log.w('Health check échec: $e');
+    }
+    _workerHealthy = false;
+    return false;
   }
 
   // ═══════════════════════════════════════════
-  // DISCONNEXION
+  // HEARTBEAT
+  // ═══════════════════════════════════════════
+
+  /// Heartbeat léger — garde la présence du nœud sur le Worker.
+  Future<void> heartbeat(String nodeId) async {
+    try {
+      await http
+          .post(
+            Uri.parse('$_workerBase/mesh/heartbeat'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'nodeId': nodeId}),
+          )
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      // Silencieux — un heartbeat raté n'est pas critique
+    }
+  }
+
+  // ═══════════════════════════════════════════
+  // DÉSENREGISTREMENT
   // ═══════════════════════════════════════════
 
   Future<void> deregisterNode(String nodeId) async {
     try {
-      await BufferWaveApi.disconnect(nodeId);
+      await http
+          .post(
+            Uri.parse('$_workerBase/mesh/disconnect'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'nodeId': nodeId}),
+          )
+          .timeout(const Duration(seconds: 3));
     } catch (_) {}
-    _doh.dispose();
   }
 
   // ═══════════════════════════════════════════
-  // MESH WSS URL
+  // URLS
   // ═══════════════════════════════════════════
 
   String get meshWssUrl    => _meshEndpointWs;
