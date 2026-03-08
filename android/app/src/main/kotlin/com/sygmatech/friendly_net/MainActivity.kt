@@ -13,6 +13,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import java.net.InetAddress
+import kotlinx.coroutines.launch
 
 class MainActivity : FlutterActivity() {
 
@@ -20,8 +21,7 @@ class MainActivity : FlutterActivity() {
     private val SYSTEM_CHANNEL    = "friendlynet/system"
     private val VPN_CHANNEL       = "friendlynet/vpn"
     private val RELAY_CHANNEL     = "friendlynet/relay"
-    private val WIFI_DIRECT_CH    = "friendlynet/wifidirect"
-    private val WIFI_EVENT_CH     = "friendlynet/wifidirect/events"
+    // WiFi Direct now handled by flutter_p2p_connection plugin
 
     private val VPN_PERMISSION_CODE = 101
 
@@ -29,8 +29,7 @@ class MainActivity : FlutterActivity() {
     private var pendingVpnResult: MethodChannel.Result? = null
     private var pendingVpnArgs: Map<String, Any>? = null
 
-    private var wifiDirectManager: WifiDirectManager? = null
-    private var wifiEventSink: EventChannel.EventSink? = null
+    // WiFi Direct manager removed — using flutter_p2p_connection plugin
 
     // ═══════════════════════════════════════════
     // CONFIGURE FLUTTER ENGINE
@@ -41,7 +40,7 @@ class MainActivity : FlutterActivity() {
         setupSystemChannel(flutterEngine)
         setupVpnChannel(flutterEngine)
         setupRelayChannel(flutterEngine)
-        setupWifiDirectChannel(flutterEngine)
+        // WiFi Direct handled by flutter_p2p_connection plugin (auto-registered)
     }
 
     // ─── System Protection ─────────────────────────────────────────────
@@ -372,80 +371,7 @@ class MainActivity : FlutterActivity() {
         android.util.Log.d("FN-TCP", "All channels closed")
     }
 
-    // ─── WiFi Direct Channel ───────────────────────────────────────────
-    private fun setupWifiDirectChannel(engine: FlutterEngine) {
-        // Method channel : commandes
-        MethodChannel(engine.dartExecutor.binaryMessenger, WIFI_DIRECT_CH)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "initialize" -> {
-                        val mgr = WifiDirectManager(applicationContext)
-                        mgr.initialize()
-                        mgr.setCallbacks(
-                            onPeers = { peers ->
-                                val list = peers.map {
-                                    mapOf("mac" to it.mac, "name" to it.name, "status" to it.statusLabel)
-                                }
-                                wifiEventSink?.success(mapOf("type" to "peers", "data" to list))
-                            },
-                            onConn = { ip ->
-                                wifiEventSink?.success(mapOf("type" to "connected", "ip" to ip))
-                            },
-                            onErr = { msg ->
-                                wifiEventSink?.success(mapOf("type" to "error", "msg" to msg))
-                            },
-                        )
-                        wifiDirectManager = mgr
-                        result.success(true)
-                    }
-                    "startDiscovery" -> {
-                        wifiDirectManager?.startDiscovery()
-                        result.success(true)
-                    }
-                    "stopDiscovery" -> {
-                        wifiDirectManager?.stopDiscovery()
-                        result.success(true)
-                    }
-                    "connect" -> {
-                        val mac = call.argument<String>("mac") ?: ""
-                        val peer = wifiDirectManager?.peers?.value?.find { it.mac == mac }
-                        if (peer != null) {
-                            wifiDirectManager?.connectToPeer(peer)
-                            result.success(true)
-                        } else {
-                            result.error("NOT_FOUND", "Pair introuvable: $mac", null)
-                        }
-                    }
-                    "disconnect" -> {
-                        wifiDirectManager?.disconnect()
-                        result.success(true)
-                    }
-                    "cleanup" -> {
-                        wifiDirectManager?.cleanup()
-                        wifiDirectManager = null
-                        result.success(true)
-                    }
-                    "peers" -> {
-                        val list = wifiDirectManager?.peers?.value?.map {
-                            mapOf("mac" to it.mac, "name" to it.name, "status" to it.statusLabel)
-                        } ?: emptyList<Map<String,String>>()
-                        result.success(list)
-                    }
-                    else -> result.notImplemented()
-                }
-            }
-
-        // Event channel : updates en temps réel
-        EventChannel(engine.dartExecutor.binaryMessenger, WIFI_EVENT_CH)
-            .setStreamHandler(object : EventChannel.StreamHandler {
-                override fun onListen(args: Any?, sink: EventChannel.EventSink) {
-                    wifiEventSink = sink
-                }
-                override fun onCancel(args: Any?) {
-                    wifiEventSink = null
-                }
-            })
-    }
+    // WiFi Direct channel removed — flutter_p2p_connection plugin handles this
 
     // ═══════════════════════════════════════════
     // VPN PERMISSION RESULT
@@ -609,7 +535,6 @@ class MainActivity : FlutterActivity() {
     // ═══════════════════════════════════════════
 
     override fun onDestroy() {
-        wifiDirectManager?.cleanup()
         super.onDestroy()
     }
 }

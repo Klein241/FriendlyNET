@@ -6,6 +6,7 @@ import okhttp3.*
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -71,7 +72,7 @@ class TailscaleMode(
     private var isEcoMode = false
 
     // Métriques réseau pour détection throttle
-    private var bytesLastSecond = 0L
+    private val bytesLastSecond = AtomicLong(0)
     private var metricsJob: Job? = null
 
     private val httpClient: OkHttpClient by lazy {
@@ -136,32 +137,40 @@ class TailscaleMode(
     // LAN ATTEMPT
     // ═══════════════════════════════════════════
 
+    // CORRECTION APPLIQUÉE : CountDownLatch zombie → suspendCancellableCoroutine
+    // DATE : 2025-03-08
     private suspend fun attemptLan(ip: String): Boolean {
-        // Tentative de connexion TCP directe sur l'IP locale (port 8899 de l'hôte)
+        // Tentative de connexion WebSocket directe sur l'IP locale (port 8899 de l'hôte)
         return try {
             withTimeout(3000) {
-                val request = Request.Builder()
-                    .url("ws://$ip:8899")
-                    .build()
-                var success = false
-                val latch = java.util.concurrent.CountDownLatch(1)
-                httpClient.newWebSocket(request, object : WebSocketListener() {
-                    override fun onOpen(ws: WebSocket, response: Response) {
-                        success = true
-                        activeWebSocket = ws
-                        latch.countDown()
-                    }
-                    override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                        latch.countDown()
-                    }
-                })
-                withContext(Dispatchers.IO) { latch.await(3, TimeUnit.SECONDS) }
-                success
+                kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                    val request = Request.Builder()
+                        .url("ws://$ip:8899")
+                        .build()
+                    val ws = httpClient.newWebSocket(
+                        request,
+                        object : WebSocketListener() {
+                            override fun onOpen(ws: WebSocket, response: Response) {
+                                activeWebSocket = ws
+                                if (cont.isActive) cont.resume(true) { ws.cancel() }
+                            }
+                            override fun onFailure(
+                                ws: WebSocket,
+                                t: Throwable,
+                                response: Response?
+                            ) {
+                                if (cont.isActive) cont.resume(false) { /* no-op */ }
+                            }
+                        }
+                    )
+                    cont.invokeOnCancellation { ws.cancel() }
+                }
             }
         } catch (_: Exception) {
             false
         }
     }
+    // ✅ CORRIGÉ — Plus de CountDownLatch zombie : annulation propre du WebSocket OkHttp via invokeOnCancellation
 
     // ═══════════════════════════════════════════
     // CLOUDFLARE ATTEMPT
@@ -200,7 +209,7 @@ class TailscaleMode(
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
                 lastActivity = System.currentTimeMillis()
-                bytesLastSecond += bytes.size
+                bytesLastSecond.addAndGet(bytes.size.toLong())
                 onDataReceived(bytes.toByteArray())
             }
 
@@ -301,8 +310,7 @@ class TailscaleMode(
         metricsJob = scope.launch {
             while (running.get()) {
                 delay(5000)
-                val bps = bytesLastSecond / 5 // bytes/s sur 5s
-                bytesLastSecond = 0
+                val bps = bytesLastSecond.getAndSet(0) / 5 // bytes/s sur 5s
 
                 if (bps < THROTTLE_THRESHOLD_BPS && !isEcoMode) {
                     Log.d(TAG, "Throttle détecté ($bps B/s < ${THROTTLE_THRESHOLD_BPS} B/s) → mode éco auto")

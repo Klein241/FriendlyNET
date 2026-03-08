@@ -1,3 +1,5 @@
+// CORRECTION APPLIQUÉE : startHosting() refresh manquant + Bluetooth permission supprimée
+// DATE : 2025-03-08
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -8,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:logger/logger.dart';
 import 'package:bufferwave_core/bufferwave_core.dart' show EdgeRelay;
+import 'package:flutter_p2p_connection/flutter_p2p_connection.dart' show BleDiscoveredDevice, HotspotHostState;
 import '../models/friend_peer.dart';
 import '../services/wifi_direct_service.dart';
 import '../services/e2e_service.dart';
@@ -73,6 +76,8 @@ class MeshProvider extends ChangeNotifier {
   // Métriques
   SessionMetrics _metrics = const SessionMetrics();
   Timer? _metricsTick;
+  int _sessionUpBytes = 0;
+  int _sessionDownBytes = 0;
 
   // Reconnexion renforcée
   Timer? _recoveryTimer;
@@ -85,11 +90,12 @@ class MeshProvider extends ChangeNotifier {
   Timer? _wsHealthCheck;
   DateTime? _lastWsActivity;
 
-  // WiFi Direct
+  // WiFi Direct (P2P réel via LocalOnlyHotspot + BLE)
   final WifiDirectService _wifiDirect = WifiDirectService();
-  List<WifiDirectPeer> _wifiPeers = [];
+  List<BleDiscoveredDevice> _wifiPeers = [];
   bool   _wifiDirectActive = false;
   String _wifiDirectIp     = '';
+  HotspotHostState? _hotspotState;
 
   // ─── Nouveaux services ───
   final E2EService             _e2e      = E2EService();
@@ -118,9 +124,10 @@ class MeshProvider extends ChangeNotifier {
   bool get isSearching => _meshActive;
 
   // WiFi Direct getters
-  List<WifiDirectPeer> get wifiPeers      => List.from(_wifiPeers);
+  List<BleDiscoveredDevice> get wifiPeers => List.from(_wifiPeers);
   bool   get wifiDirectActive             => _wifiDirectActive;
   String get wifiDirectIp                 => _wifiDirectIp;
+  HotspotHostState? get hotspotInfo       => _hotspotState;
 
   // E2E getters
   String get e2eFingerprint => _e2e.fingerprint;
@@ -188,20 +195,24 @@ class MeshProvider extends ChangeNotifier {
     _ready = true;
     notifyListeners();
 
-    // ─── Auto-activer les protections système au premier lancement ───
-    unawaited(_autoActivateSystemProtections());
+    // ✅ CORRIGÉ — protections système supprimées du bootstrap
+    // Elles sont maintenant déclenchées par PermissionGatewayScreen
   }
 
-  /// Active automatiquement toutes les protections système dès le premier
-  /// lancement : batterie, données illimitées, foreground service.
-  Future<void> _autoActivateSystemProtections() async {
+  static const _prefSystemPermsGranted = 'fn_system_perms_done';
+
+  /// À appeler UNE SEULE FOIS depuis PermissionGatewayScreen
+  /// après que l'utilisateur a cliqué "Activer".
+  /// ✅ CORRIGÉ — dialogs système uniquement après consentement utilisateur
+  Future<void> activateSystemProtections() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_prefSystemPermsGranted) == true) return;
     try {
       await requestBatteryExemption();
       await requestUnrestrictedData();
       await startForegroundGuard();
-    } catch (_) {
-      // Silencieux — les protections seront retentées au prochain lancement
-    }
+      await prefs.setBool(_prefSystemPermsGranted, true);
+    } catch (_) {}
   }
 
   Future<void> updateLabel(String name) async {
@@ -224,7 +235,7 @@ class MeshProvider extends ChangeNotifier {
 
   /// Active le mode basse consommation de données.
   /// Heartbeat toutes les 45s au lieu de 15s.
-  /// Pas de peer refresh automatique (seulement sur demande).
+  /// Peer refresh toutes les 30s au lieu de 5s.
   /// Keepalive WebSocket minimal.
   Future<void> setLowBandwidth(bool val) async {
     _lowBandwidth = val;
@@ -239,12 +250,10 @@ class MeshProvider extends ChangeNotifier {
         (_) => _sendHeartbeat(),
       );
       _refresh?.cancel();
-      if (!_lowBandwidth) {
-        _refresh = Timer.periodic(
-          Duration(seconds: _refreshSec),
-          (_) => _send({'action': 'list_peers', 'node': _nodeId}),
-        );
-      }
+      _refresh = Timer.periodic(
+        Duration(seconds: _refreshSec), // 30s en éco, 5s normal
+        (_) => _send({'action': 'list_peers', 'node': _nodeId}),
+      );
     }
     notifyListeners();
   }
@@ -290,14 +299,24 @@ class MeshProvider extends ChangeNotifier {
   // WIFI DIRECT — Découverte locale 0 data
   // ═══════════════════════════════════════════
 
-  /// Démarre la découverte WiFi Direct.
-  /// Trouve les appareils FriendlyNET proches sans utiliser de data mobile.
+  /// Démarre la découverte WiFi Direct via BLE.
+  /// Trouve les hôtes FriendlyNET proches sans utiliser de data mobile.
+  /// Utilise le scan BLE pour détecter les hotspots LocalOnlyHotspot.
   Future<void> startWifiDirect() async {
-    _wifiDirect.onPeersFound = (peers) {
-      _wifiPeers = peers;
+    // S'assurer que les permissions sont accordées
+    final permsOk = await _wifiDirect.ensurePermissions();
+    if (!permsOk) {
+      _info = 'Permissions WiFi Direct / BLE refusées';
+      notifyListeners();
+      return;
+    }
+
+    _wifiDirect.onDevicesFound = (devices) {
+      _wifiPeers = devices;
+      _info = '${devices.length} appareil(s) WiFi Direct trouvé(s)';
       notifyListeners();
     };
-    _wifiDirect.onConnected = (ip) {
+    _wifiDirect.onConnectedToHost = (ip) {
       _wifiDirectIp = ip;
       _wifiDirectActive = true;
       _info = 'WiFi Direct connecté — IP: $ip';
@@ -306,29 +325,83 @@ class MeshProvider extends ChangeNotifier {
     _wifiDirect.onDisconnected = () {
       _wifiDirectActive = false;
       _wifiDirectIp = '';
+      _info = 'WiFi Direct déconnecté';
       notifyListeners();
     };
     _wifiDirect.onError = (msg) {
       _info = 'WiFi Direct: $msg';
       notifyListeners();
     };
-    final ok = await _wifiDirect.startDiscovery();
+    _wifiDirect.onLog = (msg) {
+      _log.d('[P2P] $msg');
+    };
+    _wifiDirect.onHotspotReady = (state) {
+      _hotspotState = state;
+      _info = 'Hotspot actif: ${state.ssid}';
+      notifyListeners();
+    };
+
+    final ok = await _wifiDirect.startScanning();
     if (ok) {
-      _info = 'Recherche WiFi Direct...';
+      _info = 'Scan BLE en cours...';
       notifyListeners();
     }
   }
 
   Future<void> stopWifiDirect() async {
-    await _wifiDirect.stopDiscovery();
+    await _wifiDirect.stopScanning();
+    await _wifiDirect.stopHosting();
     _wifiPeers = [];
     _wifiDirectActive = false;
     _wifiDirectIp = '';
+    _hotspotState = null;
     notifyListeners();
   }
 
-  Future<bool> connectWifiDirect(String mac) async {
-    return await _wifiDirect.connectToPeer(mac);
+  /// Se connecte à un hôte WiFi Direct découvert via BLE.
+  /// Le flux complet est automatique :
+  ///   BLE connect → read SSID+PSK → WiFi hotspot connect → transport P2P
+  Future<bool> connectWifiDirect(BleDiscoveredDevice device) async {
+    _info = 'Connexion à ${device.deviceName}...';
+    notifyListeners();
+    return await _wifiDirect.connectToHost(device);
+  }
+
+  /// Démarre le mode hôte WiFi Direct.
+  /// Crée un hotspot local et diffuse les identifiants via BLE.
+  Future<bool> startWifiDirectHosting() async {
+    final permsOk = await _wifiDirect.ensurePermissions();
+    if (!permsOk) {
+      _info = 'Permissions WiFi Direct refusées';
+      notifyListeners();
+      return false;
+    }
+
+    _wifiDirect.onHotspotReady = (state) {
+      _hotspotState = state;
+      _wifiDirectActive = true;
+      _wifiDirectIp = state.hostIpAddress ?? '';
+      _info = 'Hotspot actif: ${state.ssid} (${state.hostIpAddress})';
+      notifyListeners();
+    };
+    _wifiDirect.onError = (msg) {
+      _info = 'WiFi Direct: $msg';
+      notifyListeners();
+    };
+    _wifiDirect.onLog = (msg) {
+      _log.d('[P2P Host] $msg');
+    };
+
+    final state = await _wifiDirect.startHosting();
+    if (state != null) {
+      _hotspotState = state;
+      _wifiDirectActive = true;
+      _wifiDirectIp = state.hostIpAddress ?? '';
+      _info = 'Hotspot WiFi Direct actif: ${state.ssid}';
+      notifyListeners();
+      return true;
+    }
+    return false;
   }
 
   // ═══════════════════════════════════════════
@@ -363,9 +436,12 @@ class MeshProvider extends ChangeNotifier {
   }
 
   /// Arrête le foreground service.
+  /// ✅ CORRIGÉ — timeout 2s garanti, pas de await bloquant
   Future<void> stopForegroundGuard() async {
     try {
-      await _systemChannel.invokeMethod('stopForeground');
+      await _systemChannel
+          .invokeMethod('stopForeground')
+          .timeout(const Duration(seconds: 2));
     } catch (_) {}
   }
 
@@ -410,6 +486,18 @@ class MeshProvider extends ChangeNotifier {
       // Annonce
       _send({'action': 'announce', 'node': _nodeId, 'name': _label, 'role': 'seeker'});
 
+    // Demander la liste immédiatement après l'annonce
+    await Future.delayed(const Duration(milliseconds: 500));
+    _send({'action': 'list_peers', 'node': _nodeId});
+
+    // Refresh agressif pour la première découverte
+    Future.delayed(const Duration(seconds: 2), () {
+      if (_meshActive) _send({'action': 'list_peers', 'node': _nodeId});
+    });
+    Future.delayed(const Duration(seconds: 5), () {
+      if (_meshActive) _send({'action': 'list_peers', 'node': _nodeId});
+    });
+
       // Heartbeat (adapté au mode basse conso)
       _heartbeat?.cancel();
       _heartbeat = Timer.periodic(
@@ -417,14 +505,12 @@ class MeshProvider extends ChangeNotifier {
         (_) => _sendHeartbeat(),
       );
 
-      // Rafraîchir les pairs (désactivé en low bandwidth)
+      // Rafraîchir les pairs — toujours actif, juste plus lent en éco
       _refresh?.cancel();
-      if (!_lowBandwidth) {
-        _refresh = Timer.periodic(
-          Duration(seconds: _refreshSec),
-          (_) => _send({'action': 'list_peers', 'node': _nodeId}),
-        );
-      }
+      _refresh = Timer.periodic(
+        Duration(seconds: _refreshSec), // 30s en éco, 5s normal
+        (_) => _send({'action': 'list_peers', 'node': _nodeId}),
+      );
 
       // Health check WebSocket (détecte si WS est mort silencieusement)
       _wsHealthCheck?.cancel();
@@ -499,12 +585,38 @@ class MeshProvider extends ChangeNotifier {
       }
       _send({'action': 'announce', 'node': _nodeId, 'name': _label, 'role': 'provider'});
 
+      // Demander la liste immédiatement après l'annonce hôte
+      await Future.delayed(const Duration(milliseconds: 500));
+      _send({'action': 'list_peers', 'node': _nodeId});
+
+      // Refresh agressif pour la première découverte
+      Future.delayed(const Duration(seconds: 2), () {
+        if (_meshActive) _send({'action': 'list_peers', 'node': _nodeId});
+      });
+      Future.delayed(const Duration(seconds: 5), () {
+        if (_meshActive) _send({'action': 'list_peers', 'node': _nodeId});
+      });
+
       // Heartbeat en mode hôte
       _heartbeat?.cancel();
       _heartbeat = Timer.periodic(
         Duration(seconds: _heartbeatSec),
         (_) => _sendHeartbeat(),
       );
+
+      // Rafraîchir les pairs — toujours actif, juste plus lent en éco
+      _refresh?.cancel();
+      _refresh = Timer.periodic(
+        Duration(seconds: _refreshSec), // 30s en éco, 5s normal
+        (_) => _send({'action': 'list_peers', 'node': _nodeId}),
+      );
+      // ✅ CORRIGÉ — Ajout du timer _refresh dans startHosting() pour que les hôtes découvrent les pairs
+
+      // Health check WebSocket (détecte si WS est mort silencieusement)
+      _wsHealthCheck?.cancel();
+      _wsHealthCheck = Timer.periodic(const Duration(seconds: 60), (_) {
+        _checkWsHealth();
+      });
     } catch (_) {}
 
     // Lancer le relais TCP natif
@@ -536,14 +648,23 @@ class MeshProvider extends ChangeNotifier {
     return true;
   }
 
+  /// ✅ CORRIGÉ — notifyListeners() garanti même si service mort
   Future<void> stopHosting() async {
-    // Cleanup host relay + packet processor
-    _hostRelay?.dispose();
-    _hostRelay = null;
-    _relayChannel.setMethodCallHandler(null);
-    try { await _relayChannel.invokeMethod('stopRelay'); } catch (_) {}
-    await stopForegroundGuard();
+    try {
+      _hostRelay?.dispose();
+      _hostRelay = null;
+      _relayChannel.setMethodCallHandler(null);
+    } catch (_) {}
+    try {
+      await _relayChannel
+          .invokeMethod('stopRelay')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await stopForegroundGuard();
+    } catch (_) {}
     stopSearch();
+    // Toujours exécuté même si erreur au-dessus
     _role = FriendRole.idle;
     _phase = MeshPhase.dormant;
     _bridge = null;
@@ -656,13 +777,21 @@ class MeshProvider extends ChangeNotifier {
     return false;
   }
 
+  /// ✅ CORRIGÉ — notifyListeners() garanti, pas d'écran noir
   Future<void> leaveFriend() async {
-    // Cleanup host relay if we were hosting
-    _hostRelay?.dispose();
-    _hostRelay = null;
-    _relayChannel.setMethodCallHandler(null);
-    try { await _vpnChannel.invokeMethod('stopVpn'); } catch (_) {}
-    await stopForegroundGuard();
+    try {
+      _hostRelay?.dispose();
+      _hostRelay = null;
+      _relayChannel.setMethodCallHandler(null);
+    } catch (_) {}
+    try {
+      await _vpnChannel
+          .invokeMethod('stopVpn')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await stopForegroundGuard();
+    } catch (_) {}
     stopSearch();
     _role = FriendRole.idle;
     _phase = MeshPhase.dormant;
@@ -713,14 +842,14 @@ class MeshProvider extends ChangeNotifier {
 
   void _handlePeerList(Map<String, dynamic> data) {
     final raw = data['peers'] as List? ?? [];
-    _friends.clear();
+    final incoming = <FriendPeer>[];
 
     for (final item in raw) {
       final m = Map<String, dynamic>.from(item as Map);
       final id = m['node'] as String? ?? '';
       if (id == _nodeId || id.isEmpty) continue;
 
-      _friends.add(FriendPeer(
+      incoming.add(FriendPeer(
         uid: id,
         nickname: m['name'] as String? ?? 'Ami',
         meshIp: m['meshAddr'] as String? ?? '',
@@ -733,13 +862,20 @@ class MeshProvider extends ChangeNotifier {
       ));
     }
 
-    _friends.sort((a, b) {
-      if (a.hosting && !b.hosting) return -1;
-      if (!a.hosting && b.hosting) return 1;
-      return b.strength.compareTo(a.strength);
-    });
+    // Ne pas effacer la liste si la réponse est vide
+    if (incoming.isNotEmpty) {
+      _friends
+        ..clear()
+        ..addAll(incoming);
 
-    _cacheFriends();
+      _friends.sort((a, b) {
+        if (a.hosting && !b.hosting) return -1;
+        if (!a.hosting && b.hosting) return 1;
+        return b.strength.compareTo(a.strength);
+      });
+
+      _cacheFriends();
+    }
     notifyListeners();
   }
 
@@ -782,7 +918,7 @@ class MeshProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _handleBridgeAccept(Map<String, dynamic> data) {
+  void _handleBridgeAccept(Map<String, dynamic> data) async {
     if (_role != FriendRole.guest) return;
 
     // ─── E2E : dériver la clé partagée avec l'hôte ───
@@ -794,8 +930,47 @@ class MeshProvider extends ChangeNotifier {
       });
     }
 
-    _info = 'Pont accepté — tunnel en cours...';
+    _info = 'Pont accepté — démarrage tunnel...';
     notifyListeners();
+
+    // Vérifier si le VPN natif tourne déjà
+    bool vpnRunning = false;
+    try {
+      vpnRunning = await _vpnChannel.invokeMethod('isRunning') == true;
+    } catch (_) {}
+
+    if (!vpnRunning && _bridge != null && _phase == MeshPhase.handshake) {
+      // Relancer le VPN avec les paramètres du bridge actuel
+      try {
+        final ok = await _vpnChannel.invokeMethod('startVpn', {
+          'nodeId':            _bridge!.uid,
+          'userId':            _nodeId,
+          'killSwitch':        false,
+          'localProxy':        true,
+          'proxyHost':         _bridge!.meshIp.isNotEmpty
+              ? _bridge!.meshIp : _bridge!.uid,
+          'proxyPort':         8899,
+          'workerUrl':         'wss://friendlynet-mesh.bufferwave.workers.dev/tunnel',
+          'tunnelKey':         '',
+          'lowBandwidth':      _lowBandwidth,
+          'keepaliveInterval': _lowBandwidth ? 45 : 15,
+        });
+        if (ok == true) {
+          _phase = MeshPhase.live;
+          _info = 'Internet via ${_bridge!.nickname} ✓';
+          _startMetrics();
+          notifyListeners();
+        }
+      } catch (e) {
+        _info = 'Erreur tunnel: $e';
+        _phase = MeshPhase.broken;
+        notifyListeners();
+      }
+    } else if (vpnRunning) {
+      _phase = MeshPhase.live;
+      _info = 'Internet via ${_bridge!.nickname} ✓';
+      notifyListeners();
+    }
   }
 
   // ═══════════════════════════════════════════
@@ -812,45 +987,56 @@ class MeshProvider extends ChangeNotifier {
     final workerBase = _bwApi.isInitialized
         ? _bwApi.workerBaseUrl
         : 'https://friendlynet-mesh.bufferwave.workers.dev';
-    final wsEndpoint = workerBase
+    final wsBase = workerBase
         .replaceFirst('https://', 'wss://')
         .replaceFirst('http://', 'ws://');
 
+    // ✅ CORRIGÉ — user=HOST_NODEID & peer=GUEST_NODEID dans l'URL
+    // Le Worker cherche la clé "HOST→GUEST" dans relayWaiting
+    // TailscaleMode (guest) se connecte avec user=GUEST&peer=HOST
+    // Le Worker trouve "HOST→GUEST" == partnerKey de "GUEST→HOST" ✅
+    final tunnelUrl = '$wsBase/tunnel?user=$_nodeId&peer=$guestNodeId&mode=host';
+
     _hostRelay = EdgeRelay(
-      endpoints: ['$wsEndpoint/tunnel'],
+      endpoints: [tunnelUrl],
       localId: _nodeId,
       peerId: guestNodeId,
-      queryParams: {'mode': 'host'},
+      queryParams: {},  // ✅ CORRIGÉ — vide, tout est déjà dans l'URL
     );
 
     _hostRelay!.onPaired = () {
-      _log.i('Host relay ✅ paired with guest $guestNodeId');
+      _log.i('Host relay ✅ paired avec guest $guestNodeId');
       _info = 'Relay actif — trafic en transit';
       notifyListeners();
     };
 
     _hostRelay!.onData = (Uint8List data) {
-      // Raw IP packets from guest → forward to native PacketProcessor
       if (data.isEmpty) return;
+      // Paquets IP du guest → forwarder vers FriendlyNetRelayService
       _relayChannel.invokeMethod('processPacket', {
         'data': data.toList(),
       }).catchError((_) {});
-
-      // Update metrics
       _sessionUpBytes += data.length;
     };
 
     _hostRelay!.onDisconnected = () {
-      _log.w('Host relay disconnected — auto-reconnect');
+      _log.w('Host relay déconnecté — tentative reconnexion');
+      // ✅ CORRIGÉ — auto-reconnect si toujours host
+      if (_role == FriendRole.host && _bridge != null) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (_role == FriendRole.host && _bridge != null) {
+            _startHostRelayTunnel(guestNodeId);
+          }
+        });
+      }
     };
 
-    _hostRelay!.onError = (e) => _log.w('Host relay: $e');
+    _hostRelay!.onError = (e) => _log.w('Host relay erreur: $e');
 
-    // Listen for response packets from native PacketProcessor → send back to guest
+    // Listen for response packets from native relay → send back to guest
     _relayChannel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'responsePacket':
-          // Response IP packet from Internet → send back to guest via relay
           final data = call.arguments['data'];
           if (data != null && _hostRelay != null) {
             final bytes = data is List<int>
@@ -861,18 +1047,23 @@ class MeshProvider extends ChangeNotifier {
           }
           break;
         case 'metricsUpdate':
-          // Native metrics update
-          final bIn = call.arguments['bytesIn'] as int? ?? 0;
-          final bOut = call.arguments['bytesOut'] as int? ?? 0;
-          _sessionDownBytes = bIn;
-          _sessionUpBytes = bOut;
+          _sessionDownBytes = call.arguments['bytesIn'] as int? ?? 0;
+          _sessionUpBytes = call.arguments['bytesOut'] as int? ?? 0;
           notifyListeners();
           break;
       }
     });
 
     _hostRelay!.connect().then((ok) {
-      _log.i('Host relay connect: ${ok ? "OK" : "FAIL"}');
+      _log.i('Host relay connect: ${ok ? "OK ✅" : "ÉCHEC ❌"}');
+      // ✅ CORRIGÉ — retry si connect échoue
+      if (!ok) {
+        Future.delayed(const Duration(seconds: 5), () {
+          if (_role == FriendRole.host && _bridge != null) {
+            _startHostRelayTunnel(guestNodeId);
+          }
+        });
+      }
     });
   }
 

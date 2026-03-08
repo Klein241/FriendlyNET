@@ -194,7 +194,8 @@ class SettingsScreen extends StatelessWidget {
                                       shape: BoxShape.circle,
                                       border: Border.all(color: const Color(0xFF00BCD4).withAlpha(80)),
                                     ),
-                                    child: Center(child: Text(p.letter,
+                                    child: Center(child: Text(
+                                      p.deviceName.isNotEmpty ? p.deviceName[0].toUpperCase() : '?',
                                       style: const TextStyle(color: Color(0xFF00BCD4),
                                           fontWeight: FontWeight.w700))),
                                   ),
@@ -202,27 +203,27 @@ class SettingsScreen extends StatelessWidget {
                                   Expanded(child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(p.name, style: const TextStyle(color: Colors.white,
-                                          fontSize: 13, fontWeight: FontWeight.w600)),
-                                      Text(p.statusLabel, style: TextStyle(
+                                      Text(p.deviceName.isNotEmpty ? p.deviceName : 'Appareil inconnu',
+                                        style: const TextStyle(color: Colors.white,
+                                            fontSize: 13, fontWeight: FontWeight.w600)),
+                                      Text(p.deviceAddress, style: TextStyle(
                                           color: Colors.white.withAlpha(100), fontSize: 10)),
                                     ],
                                   )),
-                                  if (p.isAvailable)
-                                    GestureDetector(
-                                      onTap: () => prov.connectWifiDirect(p.mac),
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF00BCD4).withAlpha(25),
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: const Color(0xFF00BCD4).withAlpha(80)),
-                                        ),
-                                        child: const Text('Connecter',
-                                          style: TextStyle(color: Color(0xFF00BCD4),
-                                              fontSize: 11, fontWeight: FontWeight.w700)),
+                                  GestureDetector(
+                                    onTap: () => prov.connectWifiDirect(p),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF00BCD4).withAlpha(25),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: const Color(0xFF00BCD4).withAlpha(80)),
                                       ),
+                                      child: const Text('Connecter',
+                                        style: TextStyle(color: Color(0xFF00BCD4),
+                                            fontSize: 11, fontWeight: FontWeight.w700)),
                                     ),
+                                  ),
                                 ],
                               ),
                             )),

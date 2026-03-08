@@ -80,10 +80,9 @@ class PeerDiscoveryService {
         for (final item in list) {
           final m = Map<String, dynamic>.from(item as Map);
           _discovered.add(FriendPeer(
-            nodeId: m['mac'] as String? ?? '',
-            label: m['name'] as String? ?? 'Appareil',
-            mac: m['mac'] as String? ?? '',
-            statusLabel: m['status'] as String? ?? '',
+            uid: m['mac'] as String? ?? '',
+            nickname: m['name'] as String? ?? 'Appareil',
+            hwAddr: m['mac'] as String? ?? '',
           ));
         }
         onPeersUpdated?.call(List.from(_discovered));

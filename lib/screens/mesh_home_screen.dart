@@ -20,6 +20,7 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
     with TickerProviderStateMixin {
   late AnimationController _scanAnim;
   late AnimationController _shareBtn;
+  bool _navigated = false; // Guard pour éviter boucle de navigation
 
   static const _bg = Color(0xFF0D0D1A);
   static const _surface = Color(0xFF161630);
@@ -39,6 +40,8 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
       final prov = context.read<MeshProvider>();
       if (prov.isIdle) {
         prov.startSearch();
+        // Lancer aussi le scan WiFi Direct BLE en parallèle
+        prov.startWifiDirect();
         _scanAnim.repeat(reverse: true);
       }
     });
@@ -71,14 +74,21 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
   Widget build(BuildContext context) {
     return Consumer<MeshProvider>(
       builder: (ctx, prov, _) {
-        if (prov.isHosting) {
+        // Navigation fiable : un seul push, avec garde anti-boucle
+        if (!_navigated && prov.isHosting) {
+          _navigated = true;
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HostingScreen()));
+            if (mounted) {
+              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HostingScreen()));
+            }
           });
         }
-        if (prov.isGuest) {
+        if (!_navigated && prov.isGuest) {
+          _navigated = true;
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const GuestScreen()));
+            if (mounted) {
+              Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const GuestScreen()));
+            }
           });
         }
 

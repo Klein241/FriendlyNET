@@ -58,6 +58,7 @@ class FriendlyNetVpnService : VpnService() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val running = AtomicBoolean(false)
     private var tunFd: ParcelFileDescriptor? = null
+    private var tunOutputStream: java.io.FileOutputStream? = null
 
     // ─── TailscaleMode — Moteur adaptatif multi-path ───
     private var tailscaleEngine: TailscaleMode? = null
@@ -157,6 +158,7 @@ class FriendlyNetVpnService : VpnService() {
             return
         }
         tunFd = fd
+        tunOutputStream = java.io.FileOutputStream(fd.fileDescriptor)
 
         // ─── Initialiser le moteur TailscaleMode ───
         val engine = TailscaleMode(
@@ -260,8 +262,7 @@ class FriendlyNetVpnService : VpnService() {
      */
     private fun writeToTun(fd: ParcelFileDescriptor, data: ByteArray) {
         try {
-            val outputStream = FileOutputStream(fd.fileDescriptor)
-            outputStream.write(data)
+            tunOutputStream?.write(data)
         } catch (e: Exception) {
             Log.v(TAG, "Erreur écriture TUN: ${e.message}")
         }
@@ -275,6 +276,8 @@ class FriendlyNetVpnService : VpnService() {
         if (!running.getAndSet(false)) return
         Log.d(TAG, "Arrêt VPN + TailscaleMode")
         try { tailscaleEngine?.stop(); tailscaleEngine = null } catch (_: Exception) {}
+        try { tunOutputStream?.close() } catch (_: Exception) {}
+        tunOutputStream = null
         try { tunFd?.close(); tunFd = null } catch (_: Exception) {}
     }
 

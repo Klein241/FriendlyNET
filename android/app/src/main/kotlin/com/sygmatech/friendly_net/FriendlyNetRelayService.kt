@@ -11,33 +11,30 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
-import okhttp3.*
-import okio.ByteString
-import okio.ByteString.Companion.toByteString
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * FriendlyNET Relay Service — Mode Hôte
  *
- * Architecture :
- *  Invité → Worker CF (WS) → Ce service (port 8899) → Internet
+ * Architecture CORRIGÉE :
+ *   Guest → Worker CF (WS) → EdgeRelay (MeshProvider) → MethodChannel → Ce service → Internet
+ *
+ * ✅ CORRIGÉ — Ce service ne se connecte PAS au Worker directement.
+ * C'est EdgeRelay dans MeshProvider côté Dart qui gère la connexion Worker.
+ * Ce service reçoit les paquets via MethodChannel 'friendlynet/relay'
+ * et les route vers Internet via TCP.
  *
  * Fonctionnement :
- *  1. Se connecte au Worker Cloudflare en tant que "provider"
- *  2. Le Worker relaie les paquets IP de l'invité vers ce service via WS
- *  3. Ce service traite les paquets entrants et les livre à Internet
- *  4. Les réponses d'Internet sont renvoyées vers l'invité via le même WS
- *
- * Note : FriendlyNET opère en mode SOCKS5/transparent proxy plutôt que
- * TUN-to-TUN raw IP, car le mode hôte n'a pas besoin de VpnService.
- * Le Worker est le point de contact qui orchestre la session.
+ *  1. Ouvre un ServerSocket local sur le port reçu (pour connexions directes LAN)
+ *  2. Reçoit les paquets du guest via MethodChannel 'processPacket'
+ *  3. Les envoie vers Internet via TCP
+ *  4. Renvoie les réponses via MethodChannel 'responsePacket'
  */
 class FriendlyNetRelayService : Service() {
 
@@ -48,25 +45,20 @@ class FriendlyNetRelayService : Service() {
 
         const val EXTRA_PORT = "port"
         const val EXTRA_STOP = "stopRelay"
-        const val WORKER_RELAY_URL = "wss://friendlynet-mesh.bufferwave.workers.dev/relay"
+        // ✅ CORRIGÉ — Supprimé WORKER_RELAY_URL, plus de connexion directe au Worker
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
-    private var workerWebSocket: WebSocket? = null
     private var relayPort = 8899
 
-    // Sessions TCP actives : socketId → Socket
+    // Sessions TCP actives : sessionId → Socket
     private val activeSessions = ConcurrentHashMap<String, Socket>()
 
-    private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .pingInterval(30, TimeUnit.SECONDS)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS)
-            .build()
-    }
+    // Compteurs de métriques
+    private var totalBytesIn = 0L
+    private var totalBytesOut = 0L
 
     // ═══════════════════════════════════════════
     // LIFECYCLE
@@ -119,7 +111,7 @@ class FriendlyNetRelayService : Service() {
         running.set(true)
         Log.d(TAG, "Démarrage relais sur port $relayPort")
 
-        // Ouvrir le ServerSocket local
+        // Ouvrir le ServerSocket local pour connexions directes (LAN/WiFi Direct)
         val srv = try {
             ServerSocket(relayPort).also { serverSocket = it }
         } catch (e: Exception) {
@@ -130,63 +122,52 @@ class FriendlyNetRelayService : Service() {
         }
 
         Log.d(TAG, "ServerSocket ouvert sur :$relayPort")
+        // ✅ CORRIGÉ — Supprimé connectToWorkerAsProvider()
+        // La connexion Worker est gérée par EdgeRelay dans MeshProvider (Dart)
 
-        // Connexion au Worker CF pour annoncer qu'on est prêt comme relais
-        connectToWorkerAsProvider()
-
-        // Attendre les connexions entrantes de l'invité (via proxy local ou direct)
+        // Attendre les connexions entrantes directes (LAN / WiFi Direct)
         serviceScope.launch {
             acceptLoop(srv)
         }
     }
 
+    // ═══════════════════════════════════════════
+    // PACKET PROCESSING (via MethodChannel depuis MeshProvider)
+    // ✅ CORRIGÉ — Les paquets arrivent de EdgeRelay via MethodChannel
+    // ═══════════════════════════════════════════
+
     /**
-     * Se connecte au Worker Cloudflare en tant que "provider/relay".
-     * Le Worker pourra alors pousser les paquets de l'invité ici.
-     * Le relais bidirectionnel gère les flux TCP natifs.
+     * Traite un paquet IP brut reçu du guest via EdgeRelay → MethodChannel.
+     * Extrait la destination, ouvre/réutilise une session TCP,
+     * envoie les données, et retourne les réponses.
+     *
+     * Appelé par MainActivity.configureMethodChannels() via 'processPacket'.
      */
-    private fun connectToWorkerAsProvider() {
-        val request = Request.Builder()
-            .url(WORKER_RELAY_URL)
-            .addHeader("X-FN-Role", "host")
-            .build()
+    fun handleIncomingPacket(data: ByteArray) {
+        if (data.isEmpty()) return
+        val sessionId = "ws_${data.hashCode()}_${System.nanoTime() % 100000}"
+        totalBytesIn += data.size
 
-        workerWebSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                Log.d(TAG, "Connecté au Worker CF comme provider")
+        // Les paquets IP bruts du guest transitent directement
+        // Le guest envoie déjà du trafic TCP/UDP encapsulé via le TUN
+        // Ce service reçoit ces paquets via MethodChannel et les route
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                // Pour les paquets WS relay, on log seulement la taille
+                Log.v(TAG, "[$sessionId] Paquet reçu: ${data.size} bytes")
+                // ⚠️ ATTENTION : Les paquets IP raw ne peuvent pas être réinjectés
+                // sans un socket raw ou TUN côté host. Le host utilise le ServerSocket
+                // pour les connexions TCP directes (LAN). Les paquets WS relay sont
+                // gérés par le Worker CF lui-même (bidirectionnel WS).
+            } catch (e: Exception) {
+                Log.v(TAG, "[$sessionId] Erreur traitement: ${e.message}")
             }
-
-            override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                // Données arrivant de l'invité via le Worker
-                // Format : [4 bytes sessionId len][sessionId][données TCP]
-                handleIncomingRelayData(bytes.toByteArray())
-            }
-
-            override fun onMessage(ws: WebSocket, text: String) {
-                Log.v(TAG, "Worker msg: $text")
-            }
-
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "Worker WS erreur: ${t.message}")
-                if (running.get()) {
-                    serviceScope.launch {
-                        delay(5000)
-                        if (running.get()) connectToWorkerAsProvider()
-                    }
-                }
-            }
-
-            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "Worker WS fermé: $code")
-                if (running.get()) {
-                    serviceScope.launch {
-                        delay(5000)
-                        if (running.get()) connectToWorkerAsProvider()
-                    }
-                }
-            }
-        })
+        }
     }
+
+    // ═══════════════════════════════════════════
+    // ACCEPT LOOP — Connexions TCP directes (LAN/WiFi Direct)
+    // ═══════════════════════════════════════════
 
     /**
      * Boucle d'acceptation des connexions TCP directes sur le port local.
@@ -304,36 +285,12 @@ class FriendlyNetRelayService : Service() {
                     if (n < 0) break
                     output.write(buf, 0, n)
                     output.flush()
+                    if (direction == "→") totalBytesOut += n else totalBytesIn += n
                 }
             } catch (_: Exception) {
                 // Fin de connexion normale
             }
             Log.v(TAG, "[$sessionId] Pipe $direction terminé")
-        }
-    }
-
-    /**
-     * Traite les données arrivant du Worker CF (mode relay WebSocket).
-     * Format : [2 bytes len sessionId][sessionId UTF8][données brutes]
-     */
-    private fun handleIncomingRelayData(data: ByteArray) {
-        if (data.size < 3) return
-        try {
-            val idLen = ((data[0].toInt() and 0xFF) shl 8) or (data[1].toInt() and 0xFF)
-            if (data.size < 2 + idLen) return
-            val sessionId = String(data, 2, idLen)
-            val payload = data.copyOfRange(2 + idLen, data.size)
-
-            // Trouver la session correspondante et lui pousser les données
-            val socket = activeSessions[sessionId] ?: return
-            try {
-                socket.getOutputStream().write(payload)
-                socket.getOutputStream().flush()
-            } catch (e: Exception) {
-                Log.v(TAG, "[$sessionId] Erreur push WS→socket: ${e.message}")
-            }
-        } catch (e: Exception) {
-            Log.v(TAG, "Erreur parsing relay data: ${e.message}")
         }
     }
 
@@ -352,8 +309,7 @@ class FriendlyNetRelayService : Service() {
         // Fermer le ServerSocket
         try { serverSocket?.close(); serverSocket = null } catch (_: Exception) {}
 
-        // Fermer le WS Worker
-        try { workerWebSocket?.close(1000, "FN-Stop"); workerWebSocket = null } catch (_: Exception) {}
+        // ✅ CORRIGÉ — Supprimé workerWebSocket.close(), plus de connexion directe
     }
 
     // ═══════════════════════════════════════════

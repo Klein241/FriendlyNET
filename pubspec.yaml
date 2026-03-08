@@ -16,6 +16,10 @@ dependencies:
       url: https://github.com/Klein241/bufferwave-core.git
       ref: main
 
+  # ─── WiFi Direct P2P réel (Hotspot + BLE discovery) ───
+  flutter_p2p_connection:
+    path: ../Documents/tailscale-main pour réseau/flutter_p2p_connection-main
+
   # ─── État global ───
   provider: ^6.1.2
 
