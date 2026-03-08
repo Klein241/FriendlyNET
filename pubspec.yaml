@@ -1,7 +1,7 @@
 name: friendly_net
 description: FriendlyNET — Partage Internet coopératif entre amis, sans frontières.
 publish_to: 'none'
-version: 1.0.0+2
+version: 1.1.0+3
 
 environment:
   sdk: ^3.5.0
@@ -33,6 +33,8 @@ dependencies:
   # ─── Système ───
   connectivity_plus: ^5.0.2
   permission_handler: ^11.0.0
+  url_launcher: ^6.2.0
+  package_info_plus: ^8.0.0
 
   # ─── Sécurité E2E ───
   # X25519 ECDH + AES-256-GCM pour chiffrement pairs

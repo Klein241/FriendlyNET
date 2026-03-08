@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/friend_peer.dart';
 import '../providers/mesh_provider.dart';
+import '../services/update_service.dart';
 import 'hosting_screen.dart';
 import 'guest_screen.dart';
 import 'settings_screen.dart';
@@ -44,6 +45,8 @@ class _MeshHomeScreenState extends State<MeshHomeScreen>
         prov.startWifiDirect();
         _scanAnim.repeat(reverse: true);
       }
+      // Vérifier les mises à jour en arrière-plan
+      UpdateService.checkForUpdate(context);
     });
   }
 
